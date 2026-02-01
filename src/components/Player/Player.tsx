@@ -1,13 +1,45 @@
 import { useState, useEffect } from "react";
-import type { RoomState, User, GuessItem } from "../../types/game";
+import type { RoomState, User, GuessItem, VoteTally } from "../../types/game";
 
 interface PlayerProps {
   roomState: RoomState;
   currentUser: User;
   ws: WebSocket | null;
+  onLeave: () => void;
 }
 
-export default function Player({ roomState, currentUser, ws }: PlayerProps) {
+function buildTallies(roomState: RoomState, roundNumber: number): VoteTally[] {
+  const counts = new Map<number, number>();
+  const roundGuesses = roomState.guesses.filter(g => g.round_number === roundNumber);
+
+  roundGuesses.forEach(guess => {
+    counts.set(guess.guessed_item_id, (counts.get(guess.guessed_item_id) ?? 0) + 1);
+  });
+
+  return Array.from(counts.entries())
+    .map(([itemId, count]) => {
+      const item = roomState.guessItems.find(i => i.id === itemId);
+      return {
+        guess_item_id: itemId,
+        guess_item_name: item?.name || "Unknown",
+        vote_count: count
+      };
+    })
+    .sort((a, b) => b.vote_count - a.vote_count);
+}
+
+function LeaveButton({ onLeave }: { onLeave: () => void }) {
+  return (
+    <button
+      onClick={onLeave}
+      className="fixed top-4 right-4 z-50 bg-white/90 text-slate-900 px-4 py-2 rounded-full text-sm font-semibold shadow-lg border border-slate-200 hover:bg-white"
+    >
+      Leave
+    </button>
+  );
+}
+
+export default function Player({ roomState, currentUser, ws, onLeave }: PlayerProps) {
   const [assignedItem, setAssignedItem] = useState<{ id: number; name: string } | null>(null);
   const [associationInput, setAssociationInput] = useState("");
   const [hasSubmitted, setHasSubmitted] = useState(false);
@@ -19,6 +51,7 @@ export default function Player({ roomState, currentUser, ws }: PlayerProps) {
   } | null>(null);
   const [selectedOption, setSelectedOption] = useState<number | null>(null);
   const [hasGuessed, setHasGuessed] = useState(false);
+  const isGuessPhase = roomState.room.status === "guessing" || roomState.room.status === "lightning";
 
   useEffect(() => {
     if (!ws) return;
@@ -71,16 +104,16 @@ export default function Player({ roomState, currentUser, ws }: PlayerProps) {
   }, [roomState, currentUser.id]);
 
   useEffect(() => {
-    if (roomState.room.status === "guessing" && roomState.currentRound) {
+    if (isGuessPhase && roomState.currentRound) {
       const guessed = roomState.guesses.some(
         g => g.user_id === currentUser.id && g.round_number === roomState.currentRound?.round_number
       );
       setHasGuessed(guessed);
     }
-  }, [roomState, currentUser.id]);
+  }, [roomState, currentUser.id, isGuessPhase]);
 
   useEffect(() => {
-    if (roomState.room.status !== "guessing") {
+    if (!isGuessPhase) {
       setCurrentRoundData(null);
       setSelectedOption(null);
     }
@@ -88,7 +121,7 @@ export default function Player({ roomState, currentUser, ws }: PlayerProps) {
     if (roomState.room.status !== "submitting") {
       setAssociationInput("");
     }
-  }, [roomState.room.status]);
+  }, [roomState.room.status, isGuessPhase]);
 
   const handleSubmitAssociation = () => {
     if (!associationInput.trim() || !ws || hasSubmitted) return;
@@ -110,22 +143,29 @@ export default function Player({ roomState, currentUser, ws }: PlayerProps) {
   };
 
   if (roomState.room.status === "lobby") {
+    const players = roomState.users.filter(user => !user.is_host);
+    const host = roomState.users.find(user => user.is_host);
+
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-600 to-indigo-700 p-4 flex items-center justify-center">
+        <LeaveButton onLeave={onLeave} />
         <div className="max-w-md w-full bg-white rounded-3xl p-8 shadow-2xl">
           <div className="text-center mb-6">
             <div className="text-4xl font-bold text-gray-800 mb-2 tracking-widest">
               {roomState.room.code}
             </div>
             <p className="text-gray-600">Room Code</p>
+            {host && (
+              <p className="text-xs text-indigo-600 mt-2">Host screen: {host.nickname}</p>
+            )}
           </div>
 
           <div className="mb-6">
             <h3 className="text-lg font-semibold text-gray-700 mb-3">
-              Players ({roomState.users.length}/50)
+              Players ({players.length}/50)
             </h3>
             <div className="space-y-2 max-h-64 overflow-y-auto">
-              {roomState.users.map(user => (
+              {players.map(user => (
                 <div
                   key={user.id}
                   className={`p-3 rounded-xl ${
@@ -137,7 +177,6 @@ export default function Player({ roomState, currentUser, ws }: PlayerProps) {
                   <div className="flex items-center justify-between">
                     <span className="font-medium">
                       {user.nickname}
-                      {user.is_host && " (Host)"}
                     </span>
                     {user.id === currentUser.id && (
                       <span className="text-xs text-indigo-600 font-semibold">You</span>
@@ -151,6 +190,9 @@ export default function Player({ roomState, currentUser, ws }: PlayerProps) {
           <div className="text-center text-gray-600 text-sm">
             Waiting for host to start the game...
           </div>
+          <div className="mt-4 text-center text-xs text-indigo-700">
+            Tip: avoid refreshing the page. If you do, we will try to reconnect you.
+          </div>
         </div>
       </div>
     );
@@ -159,6 +201,7 @@ export default function Player({ roomState, currentUser, ws }: PlayerProps) {
   if (roomState.room.status === "submitting") {
     return (
       <div className="min-h-screen bg-gradient-to-br from-emerald-500 to-teal-600 p-4 flex items-center justify-center">
+        <LeaveButton onLeave={onLeave} />
         <div className="max-w-md w-full bg-white rounded-3xl p-8 shadow-2xl">
           {assignedItem && !hasSubmitted ? (
             <>
@@ -188,17 +231,22 @@ export default function Player({ roomState, currentUser, ws }: PlayerProps) {
               >
                 Submit
               </button>
+              <p className="mt-3 text-xs text-gray-500 text-center">
+                Please avoid refreshing during the round. If you do, we will try to reconnect you.
+              </p>
             </>
           ) : hasSubmitted ? (
             <div className="text-center">
               <div className="text-4xl mb-4">Submitted</div>
               <h2 className="text-2xl font-bold text-gray-800 mb-2">Thanks!</h2>
               <p className="text-gray-600">Waiting for other players...</p>
+              <p className="mt-3 text-xs text-gray-500">Avoid refreshing. If you do, we will try to reconnect you.</p>
             </div>
           ) : (
             <div className="text-center">
               <div className="text-2xl font-bold text-gray-800 mb-2">Waiting for assignment</div>
               <p className="text-gray-600">Hold on while the host starts the round.</p>
+              <p className="mt-3 text-xs text-gray-500">Avoid refreshing. If you do, we will try to reconnect you.</p>
             </div>
           )}
         </div>
@@ -206,9 +254,10 @@ export default function Player({ roomState, currentUser, ws }: PlayerProps) {
     );
   }
 
-  if (roomState.room.status === "guessing" && !currentRoundData) {
+  if (isGuessPhase && !currentRoundData) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-indigo-600 to-purple-700 p-4 flex items-center justify-center">
+        <LeaveButton onLeave={onLeave} />
         <div className="max-w-md w-full bg-white rounded-3xl p-8 shadow-2xl text-center">
           <h2 className="text-2xl font-bold text-gray-800 mb-2">Loading Round</h2>
           <p className="text-gray-600">Please wait a moment...</p>
@@ -217,10 +266,76 @@ export default function Player({ roomState, currentUser, ws }: PlayerProps) {
     );
   }
 
-  if (roomState.room.status === "guessing" && currentRoundData) {
+  if (isGuessPhase && currentRoundData) {
+    const phaseLabel = roomState.room.status === "lightning" ? "Lightning Finals" : "Round";
+    const roundStatus = roomState.currentRound?.status ?? "active";
+    const roundNumber = roomState.currentRound?.round_number ?? 0;
+    const tallies = buildTallies(roomState, roundNumber);
+    const maxVotes = Math.max(...tallies.map(t => t.vote_count), 1);
+    const correctItemName = roomState.guessItems.find(
+      item => item.id === roomState.currentRound?.guess_item_id
+    )?.name;
+    const showResults = roundStatus !== "active";
+
+    if (showResults) {
+      return (
+        <div className="min-h-screen bg-gradient-to-br from-slate-950 via-indigo-950 to-slate-900 p-4 flex items-center justify-center text-white">
+          <LeaveButton onLeave={onLeave} />
+          <div className="max-w-md w-full bg-white/10 rounded-3xl p-6 shadow-2xl border border-white/20 backdrop-blur">
+            <div className="text-center mb-6">
+              <div className="text-sm uppercase tracking-[0.3em] text-indigo-200">Poll Results</div>
+              <h2 className="font-display text-4xl mt-2">{phaseLabel} {roundNumber}</h2>
+            </div>
+
+            <div className="space-y-4 mb-6">
+              {tallies.map(tally => (
+                <div key={tally.guess_item_id}>
+                  <div className="flex items-center justify-between text-sm font-semibold">
+                    <span>{tally.guess_item_name}</span>
+                    <span>{tally.vote_count} votes</span>
+                  </div>
+                  <div className="h-3 bg-white/20 rounded-full overflow-hidden mt-2">
+                    <div
+                      className="h-full bg-gradient-to-r from-sky-400 to-indigo-400"
+                      style={{ width: `${(tally.vote_count / maxVotes) * 100}%` }}
+                    />
+                  </div>
+                </div>
+              ))}
+              {tallies.length === 0 && (
+                <p className="text-indigo-100">No votes recorded.</p>
+              )}
+            </div>
+
+            {roundStatus === "revealed" && (
+              <div className="bg-emerald-400/20 border border-emerald-200 rounded-2xl p-4 text-center mb-6">
+                <div className="text-xs uppercase tracking-[0.3em] text-emerald-100">Correct Answer</div>
+                <div className="font-display text-3xl mt-2">{correctItemName || "Unknown"}</div>
+              </div>
+            )}
+
+            <div className="border-t border-white/10 pt-4">
+              <div className="text-xs uppercase tracking-[0.3em] text-indigo-200 mb-3">Associated Words</div>
+              <div className="flex flex-wrap gap-2">
+                {currentRoundData.associations.map((assoc, idx) => (
+                  <span
+                    key={idx}
+                    className="px-3 py-1 rounded-full bg-white/10 text-sm"
+                  >
+                    {assoc.value}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     if (!currentRoundData.eligible) {
       return (
         <div className="min-h-screen bg-gradient-to-br from-orange-500 to-red-600 p-4 flex items-center justify-center">
+          <LeaveButton onLeave={onLeave} />
           <div className="max-w-md w-full bg-white rounded-3xl p-8 shadow-2xl text-center">
             <div className="text-3xl mb-4">Not this round</div>
             <h2 className="text-2xl font-bold text-gray-800 mb-2">Sit This One Out</h2>
@@ -234,7 +349,11 @@ export default function Player({ roomState, currentUser, ws }: PlayerProps) {
 
     return (
       <div className="min-h-screen bg-gradient-to-br from-indigo-600 to-purple-700 p-4 flex items-center justify-center">
+        <LeaveButton onLeave={onLeave} />
         <div className="max-w-md w-full bg-white rounded-3xl p-6 shadow-2xl">
+          <div className="text-xs uppercase tracking-[0.3em] text-indigo-500 mb-2">
+            {phaseLabel}
+          </div>
           <h2 className="text-xl font-bold text-gray-800 mb-4">Associated Words</h2>
 
           <div className="flex flex-wrap gap-2 mb-6">
@@ -264,12 +383,16 @@ export default function Player({ roomState, currentUser, ws }: PlayerProps) {
                   </button>
                 ))}
               </div>
+              <p className="mt-4 text-xs text-gray-500 text-center">
+                Please avoid refreshing during the round. If you do, we will try to reconnect you.
+              </p>
             </>
           ) : (
             <div className="text-center">
               <div className="text-4xl mb-4">Guess submitted</div>
               <h3 className="text-xl font-bold text-gray-800 mb-2">Thanks!</h3>
               <p className="text-gray-600">Waiting for results...</p>
+              <p className="mt-3 text-xs text-gray-500">Avoid refreshing. If you do, we will try to reconnect you.</p>
             </div>
           )}
         </div>
@@ -278,13 +401,22 @@ export default function Player({ roomState, currentUser, ws }: PlayerProps) {
   }
 
   if (roomState.room.status === "finished") {
-    const sortedUsers = [...roomState.users].sort((a, b) => b.score - a.score);
+    const sortedUsers = roomState.users.filter(u => !u.is_host).sort((a, b) => b.score - a.score);
     const me = roomState.users.find(u => u.id === currentUser.id) || currentUser;
 
     return (
       <div className="min-h-screen bg-gradient-to-br from-amber-400 to-orange-500 p-4 flex items-center justify-center">
+        <LeaveButton onLeave={onLeave} />
         <div className="max-w-md w-full bg-white rounded-3xl p-8 shadow-2xl">
-          <h2 className="text-3xl font-bold text-gray-800 mb-6 text-center">Game Over</h2>
+          <h2 className="font-display text-4xl text-gray-900 mb-6 text-center">Final Results</h2>
+
+          {sortedUsers.length > 0 && (
+            <div className="mb-6 rounded-3xl bg-gradient-to-br from-yellow-300 to-amber-400 p-5 text-center shadow-lg">
+              <div className="text-sm uppercase tracking-[0.3em] text-yellow-800">Winner</div>
+              <div className="text-3xl font-bold text-gray-900 mt-2">{sortedUsers[0].nickname}</div>
+              <div className="text-lg font-semibold text-yellow-900">{sortedUsers[0].score} pts</div>
+            </div>
+          )}
 
           <div className="space-y-3">
             {sortedUsers.map((user, idx) => (

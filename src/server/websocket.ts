@@ -50,8 +50,13 @@ export const handleWebSocket = {
     }
 
     // Send current round data if guessing is in progress
-    if (state.room.status === 'guessing' && state.currentRound) {
-      const roundPayload = buildRoundPayload(roomId, state.currentRound.round_number, state.currentRound.guess_item_id);
+    if ((state.room.status === 'guessing' || state.room.status === 'lightning') && state.currentRound) {
+      const roundPayload = buildRoundPayload(
+        roomId,
+        state.currentRound.round_number,
+        state.currentRound.guess_item_id,
+        state.room.status
+      );
       ws.send(JSON.stringify({ type: 'round_started', payload: roundPayload }));
     }
 
@@ -115,6 +120,14 @@ function handleMessage(ws: ServerWebSocket<WebSocketData>, msg: WSMessage) {
       handleNextRound(roomId, userId);
       break;
 
+    case 'skip_stage':
+      handleSkipStage(roomId, userId);
+      break;
+
+    case 'cancel_game':
+      handleCancelGame(roomId, userId);
+      break;
+
     default:
       ws.send(JSON.stringify({
         type: 'error',
@@ -142,8 +155,9 @@ function handleStartGame(roomId: number, userId: number, payload: { items?: stri
   );
 
   const users = db.getUsersByRoom(roomId);
+  const players = users.filter(u => !u.is_host);
 
-  if (users.length < 4) {
+  if (players.length < 4) {
     sendToUser(roomId, userId, {
       type: 'error',
       payload: { message: 'Need at least 4 players to start' }
@@ -159,7 +173,7 @@ function handleStartGame(roomId: number, userId: number, payload: { items?: stri
     return;
   }
 
-  if (items.length > users.length) {
+  if (items.length > players.length) {
     sendToUser(roomId, userId, {
       type: 'error',
       payload: { message: 'Number of items cannot exceed number of players' }
@@ -344,10 +358,81 @@ function handleNextRound(roomId: number, userId: number) {
   }
 }
 
+function handleSkipStage(roomId: number, userId: number) {
+  const user = db.getUserById(userId);
+  if (!user?.is_host) return;
+
+  const room = db.getRoomById(roomId);
+  if (!room) return;
+
+  if (room.status === 'submitting') {
+    game.startGuessingPhase(roomId);
+    startNextGuessingRound(roomId);
+    return;
+  }
+
+  if (room.status === 'guessing' || room.status === 'lightning') {
+    const round = db.getCurrentRound(roomId);
+    if (!round) return;
+
+    if (round.status === 'active') {
+      db.updateRoundStatus(round.id, 'voting');
+      const tallies = game.calculateVoteTallies(roomId, round.round_number);
+      broadcastToRoom(roomId, {
+        type: 'votes_revealed',
+        payload: { tallies }
+      });
+      broadcastRoomState(roomId);
+      return;
+    }
+
+    if (round.status === 'voting') {
+      db.updateRoundStatus(round.id, 'revealed');
+      game.awardPoints(roomId, round.round_number, round.guess_item_id);
+      const correctItem = db.getGuessItemById(round.guess_item_id);
+      const updatedUsers = db.getUsersByRoom(roomId);
+
+      broadcastToRoom(roomId, {
+        type: 'answer_revealed',
+        payload: {
+          correct_item: correctItem,
+          users: updatedUsers
+        }
+      });
+      broadcastRoomState(roomId);
+      return;
+    }
+
+    if (round.status === 'revealed') {
+      handleNextRound(roomId, userId);
+      return;
+    }
+  }
+}
+
+function handleCancelGame(roomId: number, userId: number) {
+  const user = db.getUserById(userId);
+  if (!user?.is_host) return;
+
+  const room = db.getRoomById(roomId);
+  if (!room) return;
+
+  if (room.status !== 'lobby') return;
+
+  db.updateRoomStatus(roomId, 'finished');
+
+  broadcastToRoom(roomId, {
+    type: 'game_cancelled',
+    payload: { message: 'The host cancelled the game.' }
+  });
+}
+
 function startNextGuessingRound(roomId: number) {
   const round = db.getCurrentRound(roomId);
   if (!round) return;
-  const payload = buildRoundPayload(roomId, round.round_number, round.guess_item_id);
+  const room = db.getRoomById(roomId);
+  const phase = room?.status === 'lightning' ? 'lightning' : 'guessing';
+  const payload = buildRoundPayload(roomId, round.round_number, round.guess_item_id, phase);
 
   // Send round info to all users
   broadcastToRoom(roomId, {
@@ -357,7 +442,12 @@ function startNextGuessingRound(roomId: number) {
   broadcastRoomState(roomId);
 }
 
-function buildRoundPayload(roomId: number, roundNumber: number, guessItemId: number) {
+function buildRoundPayload(
+  roomId: number,
+  roundNumber: number,
+  guessItemId: number,
+  phase: 'guessing' | 'lightning'
+) {
   const associations = db.getAssociationsByGuessItem(guessItemId);
   const options = game.ensureRoundOptions(roomId, roundNumber, guessItemId);
   const eligibleUsers = game.getEligibleGuessers(roomId, guessItemId);
@@ -366,7 +456,8 @@ function buildRoundPayload(roomId: number, roundNumber: number, guessItemId: num
     round_number: roundNumber,
     associations: associations.map(a => ({ value: a.value })),
     options,
-    eligible_user_ids: eligibleUsers.map(u => u.id)
+    eligible_user_ids: eligibleUsers.map(u => u.id),
+    phase
   };
 }
 

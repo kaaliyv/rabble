@@ -1,6 +1,9 @@
 import type { RoomState, User, GuessItem, VoteTally } from "../types/game";
 import * as db from "../db/database";
 
+const MAX_STANDARD_ROUNDS = 10;
+const PLAYER_CAP_THRESHOLD = 15;
+
 export const initializeRoomState = (roomId: number): RoomState => {
   const room = db.getRoomById(roomId);
   if (!room) throw new Error("Room not found");
@@ -31,11 +34,15 @@ export const refreshRoomState = (roomId: number): RoomState => {
 
 // Assign guess items to users
 export const assignGuessItems = (roomId: number): Map<number, number> => {
-  const users = db.getUsersByRoom(roomId);
+  const users = db.getUsersByRoom(roomId).filter(user => !user.is_host);
   const guessItems = db.getGuessItemsByRoom(roomId);
 
   if (guessItems.length === 0) {
     throw new Error("No guess items to assign");
+  }
+
+  if (users.length === 0) {
+    throw new Error("No players available");
   }
 
   const assignments = new Map<number, number>(); // userId -> guessItemId
@@ -88,16 +95,30 @@ export const startGuessingPhase = (roomId: number): void => {
     throw new Error("No guess items available");
   }
 
+  const players = db.getUsersByRoom(roomId).filter(user => !user.is_host);
+  const shouldCap = players.length > PLAYER_CAP_THRESHOLD;
+
+  const shuffled = [...guessItems].sort(() => Math.random() - 0.5);
+  const standardCount = shouldCap ? Math.min(MAX_STANDARD_ROUNDS, shuffled.length) : shuffled.length;
+  const standardItems = shuffled.slice(0, standardCount);
+  const lightningItems = shuffled.slice(standardCount);
+
+  db.setRoundQueue(roomId, 'standard', standardItems.map(item => item.id));
+  db.setRoundQueue(roomId, 'lightning', lightningItems.map(item => item.id));
+
   db.updateRoomStatus(roomId, 'guessing');
-  
-  // Create first round
-  const round = db.createRound(roomId, guessItems[0].id, 1);
+
+  const started = startNextQueuedRound(roomId, 'standard');
+  if (!started && lightningItems.length > 0) {
+    startNextQueuedRound(roomId, 'lightning');
+  }
+
   refreshRoomState(roomId);
 };
 
 // Get users who should guess (exclude those who wrote associations for this item)
 export const getEligibleGuessers = (roomId: number, guessItemId: number): User[] => {
-  const users = db.getUsersByRoom(roomId);
+  const users = db.getUsersByRoom(roomId).filter(user => !user.is_host);
   const associations = db.getAssociationsByGuessItem(guessItemId);
   const excludedUserIds = new Set(associations.map(a => a.user_id));
 
@@ -174,27 +195,58 @@ export const advanceToNextRound = (roomId: number): boolean => {
 
   db.updateRoundStatus(currentRound.id, 'completed');
 
-  const guessItems = db.getGuessItemsByRoom(roomId);
-  const nextIndex = currentRound.round_number; // 0-indexed after current
+  const room = db.getRoomById(roomId);
+  if (!room) return false;
 
-  if (nextIndex >= guessItems.length) {
-    // Game finished
+  if (room.status === 'guessing') {
+    const started = startNextQueuedRound(roomId, 'standard');
+    if (started) {
+      refreshRoomState(roomId);
+      return true;
+    }
+
+    const lightningStarted = startNextQueuedRound(roomId, 'lightning');
+    if (lightningStarted) {
+      db.updateRoomStatus(roomId, 'lightning');
+      refreshRoomState(roomId);
+      return true;
+    }
+
     db.updateRoomStatus(roomId, 'finished');
     refreshRoomState(roomId);
     return false;
   }
 
-  // Create next round
-  const nextItem = guessItems[nextIndex];
-  db.createRound(roomId, nextItem.id, currentRound.round_number + 1);
-  db.updateRoomStatus(roomId, 'guessing');
-  refreshRoomState(roomId);
-  
-  return true;
+  if (room.status === 'lightning') {
+    const lightningStarted = startNextQueuedRound(roomId, 'lightning');
+    if (lightningStarted) {
+      refreshRoomState(roomId);
+      return true;
+    }
+
+    db.updateRoomStatus(roomId, 'finished');
+    refreshRoomState(roomId);
+    return false;
+  }
+
+  return false;
 };
 
 // Clean up old rooms (optional, for maintenance)
 export const cleanupOldRooms = (maxAgeMs: number = 24 * 60 * 60 * 1000): void => {
   // This could be run periodically to clean up old rooms
   // For now, we'll keep it simple
+};
+
+export const startNextQueuedRound = (roomId: number, phase: 'standard' | 'lightning'): boolean => {
+  const next = db.getNextQueuedItem(roomId, phase);
+  if (!next) return false;
+
+  db.markQueuedItemPlayed(roomId, phase, next.guess_item_id);
+  const currentRound = db.getCurrentRound(roomId);
+  const nextRoundNumber = (currentRound?.round_number ?? 0) + 1;
+  db.createRound(roomId, next.guess_item_id, nextRoundNumber);
+  db.updateRoomStatus(roomId, phase === 'lightning' ? 'lightning' : 'guessing');
+
+  return true;
 };

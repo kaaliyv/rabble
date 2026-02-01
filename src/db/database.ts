@@ -85,6 +85,17 @@ db.exec(`
     FOREIGN KEY (guess_item_id) REFERENCES guess_items(id)
   );
 
+  CREATE TABLE IF NOT EXISTS round_queue (
+    room_id INTEGER NOT NULL,
+    phase TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    guess_item_id INTEGER NOT NULL,
+    played INTEGER DEFAULT 0,
+    PRIMARY KEY (room_id, phase, position),
+    FOREIGN KEY (room_id) REFERENCES rooms(id),
+    FOREIGN KEY (guess_item_id) REFERENCES guess_items(id)
+  );
+
   CREATE INDEX IF NOT EXISTS idx_users_room ON users(room_id);
   CREATE INDEX IF NOT EXISTS idx_guess_items_room ON guess_items(room_id);
   CREATE INDEX IF NOT EXISTS idx_associations_user ON associations(user_id);
@@ -94,6 +105,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_assignments_room ON assignments(room_id);
   CREATE INDEX IF NOT EXISTS idx_assignments_user ON assignments(user_id);
   CREATE INDEX IF NOT EXISTS idx_round_options_room_round ON round_options(room_id, round_number);
+  CREATE INDEX IF NOT EXISTS idx_round_queue_room_phase_played ON round_queue(room_id, phase, played);
 `);
 
 // Helper to generate 4-letter room code
@@ -104,6 +116,24 @@ function generateRoomCode(): string {
     code += chars.charAt(Math.floor(Math.random() * chars.length));
   }
   return code;
+}
+
+function generateRandomId(): number {
+  const buf = new Uint32Array(2);
+  crypto.getRandomValues(buf);
+  const high = buf[0]! & 0x1fffff; // 21 bits
+  const low = buf[1]!;
+  return high * 2 ** 32 + low;
+}
+
+function generateUniqueUserId(): number {
+  for (let attempts = 0; attempts < 10; attempts++) {
+    const id = generateRandomId();
+    const existing = db.query("SELECT id FROM users WHERE id = ?").get(id);
+    if (!existing) return id;
+  }
+  // Fallback to time-based id if random collides repeatedly
+  return Date.now() + Math.floor(Math.random() * 1000);
 }
 
 // Room operations
@@ -123,8 +153,9 @@ export const createRoom = (hostNickname: string): { room: Room; host: User } => 
   const roomResult = db.query("INSERT INTO rooms (code, host_id, status, created_at) VALUES (?, ?, ?, ?) RETURNING *")
     .get(code, 0, 'lobby', now) as Room; // host_id will be updated after user creation
 
-  const hostResult = db.query("INSERT INTO users (nickname, room_id, score, is_host, joined_at) VALUES (?, ?, ?, ?, ?) RETURNING *")
-    .get(hostNickname, roomResult.id, 0, 1, now) as User;
+  const hostId = generateUniqueUserId();
+  const hostResult = db.query("INSERT INTO users (id, nickname, room_id, score, is_host, joined_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING *")
+    .get(hostId, hostNickname, roomResult.id, 0, 1, now) as User;
 
   // Update room with actual host_id
   db.query("UPDATE rooms SET host_id = ? WHERE id = ?").run(hostResult.id, roomResult.id);
@@ -148,8 +179,9 @@ export const updateRoomStatus = (roomId: number, status: RoomStatus): void => {
 // User operations
 export const createUser = (nickname: string, roomId: number): User => {
   const now = Date.now();
-  return db.query("INSERT INTO users (nickname, room_id, score, is_host, joined_at) VALUES (?, ?, ?, ?, ?) RETURNING *")
-    .get(nickname, roomId, 0, 0, now) as User;
+  const userId = generateUniqueUserId();
+  return db.query("INSERT INTO users (id, nickname, room_id, score, is_host, joined_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING *")
+    .get(userId, nickname, roomId, 0, 0, now) as User;
 };
 
 export const getUserById = (id: number): User | null => {
@@ -301,6 +333,44 @@ export const getRoundOptions = (roomId: number, roundNumber: number): GuessItem[
     WHERE ro.room_id = ? AND ro.round_number = ?
     ORDER BY ro.option_order
   `).all(roomId, roundNumber) as GuessItem[];
+};
+
+// Round queue operations
+export const clearRoundQueue = (roomId: number): void => {
+  db.query("DELETE FROM round_queue WHERE room_id = ?").run(roomId);
+};
+
+export const setRoundQueue = (roomId: number, phase: 'standard' | 'lightning', guessItemIds: number[]): void => {
+  const clear = db.query("DELETE FROM round_queue WHERE room_id = ? AND phase = ?");
+  const insert = db.query(
+    "INSERT INTO round_queue (room_id, phase, position, guess_item_id, played) VALUES (?, ?, ?, ?, 0)"
+  );
+
+  db.transaction(() => {
+    clear.run(roomId, phase);
+    guessItemIds.forEach((guessItemId, index) => {
+      insert.run(roomId, phase, index + 1, guessItemId);
+    });
+  })();
+};
+
+export const getNextQueuedItem = (
+  roomId: number,
+  phase: 'standard' | 'lightning'
+): { guess_item_id: number } | null => {
+  return db.query(
+    "SELECT guess_item_id FROM round_queue WHERE room_id = ? AND phase = ? AND played = 0 ORDER BY position ASC LIMIT 1"
+  ).get(roomId, phase) as { guess_item_id: number } | null;
+};
+
+export const markQueuedItemPlayed = (
+  roomId: number,
+  phase: 'standard' | 'lightning',
+  guessItemId: number
+): void => {
+  db.query(
+    "UPDATE round_queue SET played = 1 WHERE room_id = ? AND phase = ? AND guess_item_id = ?"
+  ).run(roomId, phase, guessItemId);
 };
 
 export { db };

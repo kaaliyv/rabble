@@ -67,6 +67,39 @@ export const routes = {
     }
   },
 
+  // Reconnect to an existing user in a room
+  "POST /api/room/reconnect": async (req: Request) => {
+    const body = await req.json();
+    const code = (body?.code ?? "").toString().trim();
+    const userId = Number(body?.userId);
+
+    if (!code || !Number.isInteger(userId)) {
+      return Response.json({ error: "Code and userId are required" }, { status: 400 });
+    }
+
+    try {
+      const room = db.getRoomByCode(code.toUpperCase());
+      if (!room) {
+        return Response.json({ error: "Room not found" }, { status: 404 });
+      }
+
+      const user = db.getUserById(userId);
+      if (!user || user.room_id !== room.id) {
+        return Response.json({ error: "User not found" }, { status: 404 });
+      }
+
+      game.refreshRoomState(room.id);
+
+      return Response.json({
+        room,
+        user
+      });
+    } catch (error) {
+      console.error("Error reconnecting:", error);
+      return Response.json({ error: "Failed to reconnect" }, { status: 500 });
+    }
+  },
+
   // Get room state
   "GET /api/room/:code": async (req: Request) => {
     const url = new URL(req.url);

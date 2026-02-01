@@ -80,6 +80,17 @@ CREATE TABLE IF NOT EXISTS round_options (
     FOREIGN KEY (guess_item_id) REFERENCES guess_items(id)
 );
 
+CREATE TABLE IF NOT EXISTS round_queue (
+    room_id INTEGER NOT NULL,
+    phase TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    guess_item_id INTEGER NOT NULL,
+    played INTEGER DEFAULT 0,
+    PRIMARY KEY (room_id, phase, position),
+    FOREIGN KEY (room_id) REFERENCES rooms(id),
+    FOREIGN KEY (guess_item_id) REFERENCES guess_items(id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_users_room ON users(room_id);
 CREATE INDEX IF NOT EXISTS idx_guess_items_room ON guess_items(room_id);
 CREATE INDEX IF NOT EXISTS idx_associations_user ON associations(user_id);
@@ -89,3 +100,4 @@ CREATE INDEX IF NOT EXISTS idx_rounds_room ON rounds(room_id);
 CREATE INDEX IF NOT EXISTS idx_assignments_room ON assignments(room_id);
 CREATE INDEX IF NOT EXISTS idx_assignments_user ON assignments(user_id);
 CREATE INDEX IF NOT EXISTS idx_round_options_room_round ON round_options(room_id, round_number);
+CREATE INDEX IF NOT EXISTS idx_round_queue_room_phase_played ON round_queue(room_id, phase, played);

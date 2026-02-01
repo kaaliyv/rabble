@@ -1,6 +1,6 @@
 // Game Types
 
-export type RoomStatus = 'lobby' | 'submitting' | 'guessing' | 'results' | 'finished';
+export type RoomStatus = 'lobby' | 'submitting' | 'guessing' | 'lightning' | 'results' | 'finished';
 export type RoundStatus = 'active' | 'voting' | 'revealed' | 'completed';
 
 export interface Room {

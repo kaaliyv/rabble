@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import Home from "./components/Home/Home";
 import Player from "./components/Player/Player";
-import HostControls from "./components/Shared/HostControls";
+import HostScreen from "./components/HostScreen/HostScreen";
 import type { RoomState, Room, User } from "./types/game";
 
 type AppState = 
@@ -13,6 +13,95 @@ export default function App() {
   const [roomState, setRoomState] = useState<RoomState | null>(null);
   const [ws, setWs] = useState<WebSocket | null>(null);
   const [error, setError] = useState<string>('');
+  const [isReconnecting, setIsReconnecting] = useState<boolean>(true);
+
+  const SESSION_KEY = 'rabble_session';
+
+  const saveSession = (code: string, userId: number) => {
+    try {
+      localStorage.setItem(SESSION_KEY, JSON.stringify({ code, userId }));
+    } catch {
+      // Ignore storage errors
+    }
+  };
+
+  const clearSession = () => {
+    try {
+      localStorage.removeItem(SESSION_KEY);
+    } catch {
+      // Ignore storage errors
+    }
+  };
+
+  const loadSession = (): { code: string; userId: number } | null => {
+    try {
+      const raw = localStorage.getItem(SESSION_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed?.code || !parsed?.userId) return null;
+      return { code: String(parsed.code), userId: Number(parsed.userId) };
+    } catch {
+      return null;
+    }
+  };
+
+  const exitToHome = (message?: string) => {
+    clearSession();
+    setError(message ?? '');
+    setRoomState(null);
+    setAppState({ view: 'home' });
+    setWs((prev) => {
+      prev?.close();
+      return null;
+    });
+  };
+
+  const handleLeaveGame = () => exitToHome();
+
+  useEffect(() => {
+    let active = true;
+
+    const attemptReconnect = async () => {
+      const session = loadSession();
+      if (!session) {
+        if (active) setIsReconnecting(false);
+        return;
+      }
+
+      try {
+        const response = await fetch('/api/room/reconnect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: session.code, userId: session.userId })
+        });
+
+        if (!response.ok) {
+          const data = await response.json();
+          clearSession();
+          if (active) setError(data.error || 'Failed to reconnect');
+          return;
+        }
+
+        const data = await response.json();
+        if (!active) return;
+        setAppState({
+          view: 'game',
+          room: data.room,
+          user: data.user
+        });
+      } catch (error) {
+        clearSession();
+        if (active) setError('Failed to reconnect');
+      } finally {
+        if (active) setIsReconnecting(false);
+      }
+    };
+
+    attemptReconnect();
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (appState.view !== 'game') return;
@@ -39,6 +128,8 @@ export default function App() {
         setRoomState(msg.payload.state);
       } else if (msg.type === 'error') {
         setError(msg.payload.message);
+      } else if (msg.type === 'game_cancelled') {
+        exitToHome(msg.payload?.message || 'Game was cancelled');
       }
     };
 
@@ -73,6 +164,7 @@ export default function App() {
       }
 
       const data = await response.json();
+      saveSession(data.room.code, data.user.id);
       setAppState({
         view: 'game',
         room: data.room,
@@ -99,6 +191,7 @@ export default function App() {
       }
 
       const data = await response.json();
+      saveSession(data.room.code, data.user.id);
       setAppState({
         view: 'game',
         room: data.room,
@@ -114,6 +207,11 @@ export default function App() {
     return (
       <>
         <Home onCreateRoom={handleCreateRoom} onJoinRoom={handleJoinRoom} />
+        {isReconnecting && (
+          <div className="fixed top-4 left-1/2 transform -translate-x-1/2 bg-white/90 text-slate-800 px-6 py-3 rounded-xl shadow-lg border border-slate-200">
+            Reconnecting to your game...
+          </div>
+        )}
         {error && (
           <div className="fixed bottom-4 left-1/2 transform -translate-x-1/2 bg-red-500 text-white px-6 py-3 rounded-xl shadow-lg">
             {error}
@@ -135,15 +233,11 @@ export default function App() {
   const isHost = user.is_host;
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Player view is always shown */}
-      <Player roomState={roomState} currentUser={user} ws={ws} />
-
-      {/* Host controls overlay (only for host) */}
-      {isHost && (
-        <div className="fixed bottom-4 right-4 max-w-md w-full p-4">
-          <HostControls roomState={roomState} currentUser={user} ws={ws} />
-        </div>
+    <div className="min-h-screen">
+      {isHost ? (
+        <HostScreen roomState={roomState} ws={ws} onLeave={handleLeaveGame} />
+      ) : (
+        <Player roomState={roomState} currentUser={user} ws={ws} onLeave={handleLeaveGame} />
       )}
 
       {/* Error toast */}

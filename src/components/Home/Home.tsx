@@ -43,7 +43,7 @@ export default function Home({ onCreateRoom, onJoinRoom }: HomeProps) {
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-700 text-white">
       <div className="max-w-5xl mx-auto px-4 py-12">
         <div className="text-center mb-10">
-          <h1 className="text-5xl font-extrabold tracking-tight">Rabble</h1>
+          <h1 className="font-display text-6xl tracking-wide">Rabble</h1>
           <p className="text-lg text-slate-200 mt-3">
             One word each. Guess together. Reveal the truth.
           </p>
