@@ -44,3 +44,8 @@ bun start
 - The host is a screen-only role (not a player).
 - Players can reconnect after refresh using local storage.
 - Hosts can skip stages or cancel the game in the lobby.
+
+## Screenshots
+<img width="1024" height="684" alt="image" src="https://github.com/user-attachments/assets/71c2155d-e36e-4540-825c-269c6910a88f" />
+
+<img width="1906" height="916" alt="image" src="https://github.com/user-attachments/assets/1dfcee66-077f-4570-ae92-d2ed4f431357" />
