@@ -41,6 +41,7 @@ bun start
 
 ## Notes
 
+- Requires Redis (set `REDIS_URL`, default: `redis://localhost:6379`).
 - The host is a screen-only role (not a player).
 - Players can reconnect after refresh using local storage.
 - Hosts can skip stages or cancel the game in the lobby.

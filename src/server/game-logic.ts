@@ -4,38 +4,38 @@ import * as db from "../db/database";
 const MAX_STANDARD_ROUNDS = 10;
 const PLAYER_CAP_THRESHOLD = 15;
 
-export const initializeRoomState = (roomId: number): RoomState => {
-  const room = db.getRoomById(roomId);
+export const initializeRoomState = async (roomId: number): Promise<RoomState> => {
+  const room = await db.getRoomById(roomId);
   if (!room) throw new Error("Room not found");
 
   const state: RoomState = {
     room,
-    users: db.getUsersByRoom(roomId),
-    guessItems: db.getGuessItemsByRoom(roomId),
-    currentRound: db.getCurrentRound(roomId),
-    associations: db.getAssociationsByRoom(roomId),
-    guesses: db.getGuessesByRoom(roomId)
+    users: await db.getUsersByRoom(roomId),
+    guessItems: await db.getGuessItemsByRoom(roomId),
+    currentRound: await db.getCurrentRound(roomId),
+    associations: await db.getAssociationsByRoom(roomId),
+    guesses: await db.getGuessesByRoom(roomId)
   };
 
   return state;
 };
 
-export const getRoomState = (roomId: number): RoomState | null => {
+export const getRoomState = async (roomId: number): Promise<RoomState | null> => {
   try {
-    return initializeRoomState(roomId);
+    return await initializeRoomState(roomId);
   } catch {
     return null;
   }
 };
 
-export const refreshRoomState = (roomId: number): RoomState => {
+export const refreshRoomState = async (roomId: number): Promise<RoomState> => {
   return initializeRoomState(roomId);
 };
 
 // Assign guess items to users
-export const assignGuessItems = (roomId: number): Map<number, number> => {
-  const users = db.getUsersByRoom(roomId).filter(user => !user.is_host);
-  const guessItems = db.getGuessItemsByRoom(roomId);
+export const assignGuessItems = async (roomId: number): Promise<Map<number, number>> => {
+  const users = (await db.getUsersByRoom(roomId)).filter(user => !user.is_host);
+  const guessItems = await db.getGuessItemsByRoom(roomId);
 
   if (guessItems.length === 0) {
     throw new Error("No guess items to assign");
@@ -46,7 +46,7 @@ export const assignGuessItems = (roomId: number): Map<number, number> => {
   }
 
   const assignments = new Map<number, number>(); // userId -> guessItemId
-  
+
   // Calculate how many users per item
   const usersPerItem = Math.floor(users.length / guessItems.length);
   const remainder = users.length % guessItems.length;
@@ -67,35 +67,35 @@ export const assignGuessItems = (roomId: number): Map<number, number> => {
 };
 
 // Start the submission phase
-export const startSubmissionPhase = (roomId: number): Map<number, number> => {
-  db.updateRoomStatus(roomId, 'submitting');
-  const assignments = assignGuessItems(roomId);
-  refreshRoomState(roomId);
+export const startSubmissionPhase = async (roomId: number): Promise<Map<number, number>> => {
+  await db.updateRoomStatus(roomId, "submitting");
+  const assignments = await assignGuessItems(roomId);
+  await refreshRoomState(roomId);
   return assignments;
 };
 
 // Check if all users have submitted associations
-export const checkAllSubmitted = (roomId: number, assignments: Map<number, number>): boolean => {
-  const associations = db.getAssociationsByRoom(roomId);
+export const checkAllSubmitted = async (roomId: number, assignments: Map<number, number>): Promise<boolean> => {
+  const associations = await db.getAssociationsByRoom(roomId);
   const submittedUsers = new Set(associations.map(a => a.user_id));
-  
+
   for (const userId of assignments.keys()) {
     if (!submittedUsers.has(userId)) {
       return false;
     }
   }
-  
+
   return true;
 };
 
 // Start guessing phase with first round
-export const startGuessingPhase = (roomId: number): void => {
-  const guessItems = db.getGuessItemsByRoom(roomId);
+export const startGuessingPhase = async (roomId: number): Promise<void> => {
+  const guessItems = await db.getGuessItemsByRoom(roomId);
   if (guessItems.length === 0) {
     throw new Error("No guess items available");
   }
 
-  const players = db.getUsersByRoom(roomId).filter(user => !user.is_host);
+  const players = (await db.getUsersByRoom(roomId)).filter(user => !user.is_host);
   const shouldCap = players.length > PLAYER_CAP_THRESHOLD;
 
   const shuffled = [...guessItems].sort(() => Math.random() - 0.5);
@@ -103,63 +103,67 @@ export const startGuessingPhase = (roomId: number): void => {
   const standardItems = shuffled.slice(0, standardCount);
   const lightningItems = shuffled.slice(standardCount);
 
-  db.setRoundQueue(roomId, 'standard', standardItems.map(item => item.id));
-  db.setRoundQueue(roomId, 'lightning', lightningItems.map(item => item.id));
+  await db.setRoundQueue(roomId, "standard", standardItems.map(item => item.id));
+  await db.setRoundQueue(roomId, "lightning", lightningItems.map(item => item.id));
 
-  db.updateRoomStatus(roomId, 'guessing');
+  await db.updateRoomStatus(roomId, "guessing");
 
-  const started = startNextQueuedRound(roomId, 'standard');
+  const started = await startNextQueuedRound(roomId, "standard");
   if (!started && lightningItems.length > 0) {
-    startNextQueuedRound(roomId, 'lightning');
+    await startNextQueuedRound(roomId, "lightning");
   }
 
-  refreshRoomState(roomId);
+  await refreshRoomState(roomId);
 };
 
 // Get users who should guess (exclude those who wrote associations for this item)
-export const getEligibleGuessers = (roomId: number, guessItemId: number): User[] => {
-  const users = db.getUsersByRoom(roomId).filter(user => !user.is_host);
-  const associations = db.getAssociationsByGuessItem(guessItemId);
+export const getEligibleGuessers = async (roomId: number, guessItemId: number): Promise<User[]> => {
+  const users = (await db.getUsersByRoom(roomId)).filter(user => !user.is_host);
+  const associations = await db.getAssociationsByGuessItem(guessItemId);
   const excludedUserIds = new Set(associations.map(a => a.user_id));
 
   return users.filter(u => !excludedUserIds.has(u.id));
 };
 
 // Get random options for multiple choice (current item + 3 others)
-export const getGuessOptions = (roomId: number, correctItemId: number): GuessItem[] => {
-  const allItems = db.getGuessItemsByRoom(roomId);
+export const getGuessOptions = async (roomId: number, correctItemId: number): Promise<GuessItem[]> => {
+  const allItems = await db.getGuessItemsByRoom(roomId);
   const correctItem = allItems.find(i => i.id === correctItemId);
-  
+
   if (!correctItem) {
     throw new Error("Correct item not found");
   }
 
   const otherItems = allItems.filter(i => i.id !== correctItemId);
-  
+
   // Shuffle and take first 3
   const shuffled = otherItems.sort(() => Math.random() - 0.5);
   const options = [correctItem, ...shuffled.slice(0, Math.min(3, shuffled.length))];
-  
+
   // Shuffle options
   return options.sort(() => Math.random() - 0.5);
 };
 
-export const ensureRoundOptions = (roomId: number, roundNumber: number, correctItemId: number): GuessItem[] => {
-  const existing = db.getRoundOptions(roomId, roundNumber);
+export const ensureRoundOptions = async (
+  roomId: number,
+  roundNumber: number,
+  correctItemId: number
+): Promise<GuessItem[]> => {
+  const existing = await db.getRoundOptions(roomId, roundNumber);
   if (existing.length > 0) return existing;
 
-  const options = getGuessOptions(roomId, correctItemId);
-  db.setRoundOptions(roomId, roundNumber, options.map(o => o.id));
+  const options = await getGuessOptions(roomId, correctItemId);
+  await db.setRoundOptions(roomId, roundNumber, options.map(o => o.id));
   return options;
 };
 
 // Calculate vote tallies
-export const calculateVoteTallies = (roomId: number, roundNumber: number): VoteTally[] => {
-  const guesses = db.getGuessesByRound(roomId, roundNumber);
-  const guessItems = db.getGuessItemsByRoom(roomId);
-  
+export const calculateVoteTallies = async (roomId: number, roundNumber: number): Promise<VoteTally[]> => {
+  const guesses = await db.getGuessesByRound(roomId, roundNumber);
+  const guessItems = await db.getGuessItemsByRoom(roomId);
+
   const tallies = new Map<number, number>();
-  
+
   guesses.forEach(guess => {
     const current = tallies.get(guess.guessed_item_id) || 0;
     tallies.set(guess.guessed_item_id, current + 1);
@@ -170,7 +174,7 @@ export const calculateVoteTallies = (roomId: number, roundNumber: number): VoteT
       const item = guessItems.find(i => i.id === itemId);
       return {
         guess_item_id: itemId,
-        guess_item_name: item?.name || 'Unknown',
+        guess_item_name: item?.name || "Unknown",
         vote_count: count
       };
     })
@@ -178,54 +182,56 @@ export const calculateVoteTallies = (roomId: number, roundNumber: number): VoteT
 };
 
 // Award points for correct guesses
-export const awardPoints = (roomId: number, roundNumber: number, correctItemId: number): void => {
-  const guesses = db.getGuessesByRound(roomId, roundNumber);
-  
-  guesses.forEach(guess => {
-    if (guess.guessed_item_id === correctItemId) {
-      db.updateUserScore(guess.user_id, 10); // 10 points for correct guess
-    }
-  });
+export const awardPoints = async (roomId: number, roundNumber: number, correctItemId: number): Promise<void> => {
+  const guesses = await db.getGuessesByRound(roomId, roundNumber);
+
+  await Promise.all(
+    guesses.map(guess =>
+      guess.guessed_item_id === correctItemId
+        ? db.updateUserScore(guess.user_id, 10)
+        : Promise.resolve()
+    )
+  );
 };
 
 // Move to next round or finish game
-export const advanceToNextRound = (roomId: number): boolean => {
-  const currentRound = db.getCurrentRound(roomId);
+export const advanceToNextRound = async (roomId: number): Promise<boolean> => {
+  const currentRound = await db.getCurrentRound(roomId);
   if (!currentRound) return false;
 
-  db.updateRoundStatus(currentRound.id, 'completed');
+  await db.updateRoundStatus(currentRound.id, "completed");
 
-  const room = db.getRoomById(roomId);
+  const room = await db.getRoomById(roomId);
   if (!room) return false;
 
-  if (room.status === 'guessing') {
-    const started = startNextQueuedRound(roomId, 'standard');
+  if (room.status === "guessing") {
+    const started = await startNextQueuedRound(roomId, "standard");
     if (started) {
-      refreshRoomState(roomId);
+      await refreshRoomState(roomId);
       return true;
     }
 
-    const lightningStarted = startNextQueuedRound(roomId, 'lightning');
+    const lightningStarted = await startNextQueuedRound(roomId, "lightning");
     if (lightningStarted) {
-      db.updateRoomStatus(roomId, 'lightning');
-      refreshRoomState(roomId);
+      await db.updateRoomStatus(roomId, "lightning");
+      await refreshRoomState(roomId);
       return true;
     }
 
-    db.updateRoomStatus(roomId, 'finished');
-    refreshRoomState(roomId);
+    await db.updateRoomStatus(roomId, "finished");
+    await refreshRoomState(roomId);
     return false;
   }
 
-  if (room.status === 'lightning') {
-    const lightningStarted = startNextQueuedRound(roomId, 'lightning');
+  if (room.status === "lightning") {
+    const lightningStarted = await startNextQueuedRound(roomId, "lightning");
     if (lightningStarted) {
-      refreshRoomState(roomId);
+      await refreshRoomState(roomId);
       return true;
     }
 
-    db.updateRoomStatus(roomId, 'finished');
-    refreshRoomState(roomId);
+    await db.updateRoomStatus(roomId, "finished");
+    await refreshRoomState(roomId);
     return false;
   }
 
@@ -233,20 +239,20 @@ export const advanceToNextRound = (roomId: number): boolean => {
 };
 
 // Clean up old rooms (optional, for maintenance)
-export const cleanupOldRooms = (maxAgeMs: number = 24 * 60 * 60 * 1000): void => {
-  // This could be run periodically to clean up old rooms
-  // For now, we'll keep it simple
+export const cleanupOldRooms = async (maxAgeMs: number = 24 * 60 * 60 * 1000): Promise<void> => {
+  void maxAgeMs;
+  // Placeholder for cleanup logic.
 };
 
-export const startNextQueuedRound = (roomId: number, phase: 'standard' | 'lightning'): boolean => {
-  const next = db.getNextQueuedItem(roomId, phase);
+export const startNextQueuedRound = async (roomId: number, phase: "standard" | "lightning"): Promise<boolean> => {
+  const next = await db.getNextQueuedItem(roomId, phase);
   if (!next) return false;
 
-  db.markQueuedItemPlayed(roomId, phase, next.guess_item_id);
-  const currentRound = db.getCurrentRound(roomId);
+  await db.markQueuedItemPlayed(roomId, phase, next.guess_item_id);
+  const currentRound = await db.getCurrentRound(roomId);
   const nextRoundNumber = (currentRound?.round_number ?? 0) + 1;
-  db.createRound(roomId, next.guess_item_id, nextRoundNumber);
-  db.updateRoomStatus(roomId, phase === 'lightning' ? 'lightning' : 'guessing');
+  await db.createRound(roomId, next.guess_item_id, nextRoundNumber);
+  await db.updateRoomStatus(roomId, phase === "lightning" ? "lightning" : "guessing");
 
   return true;
 };

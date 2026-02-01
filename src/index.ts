@@ -50,7 +50,7 @@ const server = Bun.serve({
     }
 
     // API routes
-    const routeResponse = handleRoute(req);
+    const routeResponse = await handleRoute(req);
     if (routeResponse) {
       return routeResponse;
     }

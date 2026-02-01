@@ -1,119 +1,21 @@
-import { Database } from "bun:sqlite";
+import { createClient, type RedisClientType } from "redis";
 import type { Room, User, GuessItem, Association, Guess, Round, RoomStatus, RoundStatus } from "../types/game";
 
-const db = new Database("rabble.sqlite");
+const redisUrl = process.env.REDIS_URL || "redis://localhost:6379";
+export const redis: RedisClientType = createClient({ url: redisUrl });
 
-// Create tables
-db.exec(`
-  CREATE TABLE IF NOT EXISTS rooms (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    code TEXT UNIQUE NOT NULL,
-    host_id INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    created_at INTEGER NOT NULL
-  );
+redis.on("error", (err) => {
+  console.error("Redis error:", err);
+});
 
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    nickname TEXT NOT NULL,
-    room_id INTEGER NOT NULL,
-    score INTEGER DEFAULT 0,
-    is_host BOOLEAN DEFAULT 0,
-    joined_at INTEGER NOT NULL,
-    FOREIGN KEY (room_id) REFERENCES rooms(id)
-  );
+await redis.connect();
 
-  CREATE TABLE IF NOT EXISTS guess_items (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    room_id INTEGER NOT NULL,
-    name TEXT NOT NULL,
-    order_index INTEGER NOT NULL,
-    FOREIGN KEY (room_id) REFERENCES rooms(id)
-  );
+const ROOM_CODE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
-  CREATE TABLE IF NOT EXISTS associations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    guess_item_id INTEGER NOT NULL,
-    value TEXT NOT NULL,
-    submitted_at INTEGER NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(id),
-    FOREIGN KEY (guess_item_id) REFERENCES guess_items(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS guesses (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    guess_item_id INTEGER NOT NULL,
-    guessed_item_id INTEGER NOT NULL,
-    round_number INTEGER NOT NULL,
-    submitted_at INTEGER NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(id),
-    FOREIGN KEY (guess_item_id) REFERENCES guess_items(id),
-    FOREIGN KEY (guessed_item_id) REFERENCES guess_items(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS rounds (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    room_id INTEGER NOT NULL,
-    guess_item_id INTEGER NOT NULL,
-    round_number INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    revealed_at INTEGER,
-    FOREIGN KEY (room_id) REFERENCES rooms(id),
-    FOREIGN KEY (guess_item_id) REFERENCES guess_items(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS assignments (
-    room_id INTEGER NOT NULL,
-    user_id INTEGER NOT NULL,
-    guess_item_id INTEGER NOT NULL,
-    assigned_at INTEGER NOT NULL,
-    PRIMARY KEY (room_id, user_id),
-    FOREIGN KEY (room_id) REFERENCES rooms(id),
-    FOREIGN KEY (user_id) REFERENCES users(id),
-    FOREIGN KEY (guess_item_id) REFERENCES guess_items(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS round_options (
-    room_id INTEGER NOT NULL,
-    round_number INTEGER NOT NULL,
-    guess_item_id INTEGER NOT NULL,
-    option_order INTEGER NOT NULL,
-    PRIMARY KEY (room_id, round_number, option_order),
-    FOREIGN KEY (room_id) REFERENCES rooms(id),
-    FOREIGN KEY (guess_item_id) REFERENCES guess_items(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS round_queue (
-    room_id INTEGER NOT NULL,
-    phase TEXT NOT NULL,
-    position INTEGER NOT NULL,
-    guess_item_id INTEGER NOT NULL,
-    played INTEGER DEFAULT 0,
-    PRIMARY KEY (room_id, phase, position),
-    FOREIGN KEY (room_id) REFERENCES rooms(id),
-    FOREIGN KEY (guess_item_id) REFERENCES guess_items(id)
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_users_room ON users(room_id);
-  CREATE INDEX IF NOT EXISTS idx_guess_items_room ON guess_items(room_id);
-  CREATE INDEX IF NOT EXISTS idx_associations_user ON associations(user_id);
-  CREATE INDEX IF NOT EXISTS idx_associations_item ON associations(guess_item_id);
-  CREATE INDEX IF NOT EXISTS idx_guesses_user ON guesses(user_id);
-  CREATE INDEX IF NOT EXISTS idx_rounds_room ON rounds(room_id);
-  CREATE INDEX IF NOT EXISTS idx_assignments_room ON assignments(room_id);
-  CREATE INDEX IF NOT EXISTS idx_assignments_user ON assignments(user_id);
-  CREATE INDEX IF NOT EXISTS idx_round_options_room_round ON round_options(room_id, round_number);
-  CREATE INDEX IF NOT EXISTS idx_round_queue_room_phase_played ON round_queue(room_id, phase, played);
-`);
-
-// Helper to generate 4-letter room code
 function generateRoomCode(): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-  let code = '';
+  let code = "";
   for (let i = 0; i < 4; i++) {
-    code += chars.charAt(Math.floor(Math.random() * chars.length));
+    code += ROOM_CODE_CHARS.charAt(Math.floor(Math.random() * ROOM_CODE_CHARS.length));
   }
   return code;
 }
@@ -126,251 +28,489 @@ function generateRandomId(): number {
   return high * 2 ** 32 + low;
 }
 
-function generateUniqueUserId(): number {
+async function generateUniqueUserId(): Promise<number> {
   for (let attempts = 0; attempts < 10; attempts++) {
     const id = generateRandomId();
-    const existing = db.query("SELECT id FROM users WHERE id = ?").get(id);
-    if (!existing) return id;
+    const exists = await redis.exists(`user:${id}`);
+    if (!exists) return id;
   }
-  // Fallback to time-based id if random collides repeatedly
   return Date.now() + Math.floor(Math.random() * 1000);
 }
 
-// Room operations
-export const createRoom = (hostNickname: string): { room: Room; host: User } => {
+async function nextId(key: string): Promise<number> {
+  const value = await redis.incr(key);
+  return Number(value);
+}
+
+function parseNumber(value: string | undefined): number {
+  return value ? Number(value) : 0;
+}
+
+function parseBoolean(value: string | undefined): boolean {
+  return value === "1" || value === "true";
+}
+
+async function getHash<T extends Record<string, any>>(key: string): Promise<T | null> {
+  const data = await redis.hGetAll(key);
+  if (!data || Object.keys(data).length === 0) return null;
+  return data as T;
+}
+
+function toRoom(raw: Record<string, string>): Room {
+  return {
+    id: parseNumber(raw.id),
+    code: raw.code,
+    host_id: parseNumber(raw.host_id),
+    status: raw.status as RoomStatus,
+    created_at: parseNumber(raw.created_at)
+  };
+}
+
+function toUser(raw: Record<string, string>): User {
+  return {
+    id: parseNumber(raw.id),
+    nickname: raw.nickname,
+    room_id: parseNumber(raw.room_id),
+    score: parseNumber(raw.score),
+    is_host: parseBoolean(raw.is_host),
+    joined_at: parseNumber(raw.joined_at)
+  };
+}
+
+function toGuessItem(raw: Record<string, string>): GuessItem {
+  return {
+    id: parseNumber(raw.id),
+    room_id: parseNumber(raw.room_id),
+    name: raw.name,
+    order_index: parseNumber(raw.order_index)
+  };
+}
+
+function toAssociation(raw: Record<string, string>): Association {
+  return {
+    id: parseNumber(raw.id),
+    user_id: parseNumber(raw.user_id),
+    guess_item_id: parseNumber(raw.guess_item_id),
+    value: raw.value,
+    submitted_at: parseNumber(raw.submitted_at)
+  };
+}
+
+function toGuess(raw: Record<string, string>): Guess {
+  return {
+    id: parseNumber(raw.id),
+    user_id: parseNumber(raw.user_id),
+    guess_item_id: parseNumber(raw.guess_item_id),
+    guessed_item_id: parseNumber(raw.guessed_item_id),
+    round_number: parseNumber(raw.round_number),
+    submitted_at: parseNumber(raw.submitted_at)
+  };
+}
+
+function toRound(raw: Record<string, string>): Round {
+  return {
+    id: parseNumber(raw.id),
+    room_id: parseNumber(raw.room_id),
+    guess_item_id: parseNumber(raw.guess_item_id),
+    round_number: parseNumber(raw.round_number),
+    status: raw.status as RoundStatus,
+    revealed_at: raw.revealed_at ? parseNumber(raw.revealed_at) : null
+  };
+}
+
+export const createRoom = async (hostNickname: string): Promise<{ room: Room; host: User }> => {
   let code = generateRoomCode();
   let attempts = 0;
-  
-  // Ensure unique code
+
   while (attempts < 10) {
-    const existing = db.query("SELECT id FROM rooms WHERE code = ?").get(code);
-    if (!existing) break;
+    const exists = await redis.exists(`rooms:code:${code}`);
+    if (!exists) break;
     code = generateRoomCode();
     attempts++;
   }
 
+  const roomId = await nextId("next:roomId");
   const now = Date.now();
-  const roomResult = db.query("INSERT INTO rooms (code, host_id, status, created_at) VALUES (?, ?, ?, ?) RETURNING *")
-    .get(code, 0, 'lobby', now) as Room; // host_id will be updated after user creation
 
-  const hostId = generateUniqueUserId();
-  const hostResult = db.query("INSERT INTO users (id, nickname, room_id, score, is_host, joined_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING *")
-    .get(hostId, hostNickname, roomResult.id, 0, 1, now) as User;
-
-  // Update room with actual host_id
-  db.query("UPDATE rooms SET host_id = ? WHERE id = ?").run(hostResult.id, roomResult.id);
-  roomResult.host_id = hostResult.id;
-
-  return { room: roomResult, host: hostResult };
-};
-
-export const getRoomByCode = (code: string): Room | null => {
-  return db.query("SELECT * FROM rooms WHERE code = ?").get(code) as Room | null;
-};
-
-export const getRoomById = (id: number): Room | null => {
-  return db.query("SELECT * FROM rooms WHERE id = ?").get(id) as Room | null;
-};
-
-export const updateRoomStatus = (roomId: number, status: RoomStatus): void => {
-  db.query("UPDATE rooms SET status = ? WHERE id = ?").run(status, roomId);
-};
-
-// User operations
-export const createUser = (nickname: string, roomId: number): User => {
-  const now = Date.now();
-  const userId = generateUniqueUserId();
-  return db.query("INSERT INTO users (id, nickname, room_id, score, is_host, joined_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING *")
-    .get(userId, nickname, roomId, 0, 0, now) as User;
-};
-
-export const getUserById = (id: number): User | null => {
-  return db.query("SELECT * FROM users WHERE id = ?").get(id) as User | null;
-};
-
-export const getUsersByRoom = (roomId: number): User[] => {
-  return db.query("SELECT * FROM users WHERE room_id = ? ORDER BY joined_at").all(roomId) as User[];
-};
-
-export const updateUserScore = (userId: number, scoreIncrement: number): void => {
-  db.query("UPDATE users SET score = score + ? WHERE id = ?").run(scoreIncrement, userId);
-};
-
-// GuessItem operations
-export const createGuessItems = (roomId: number, items: string[]): GuessItem[] => {
-  const results: GuessItem[] = [];
-  items.forEach((item, index) => {
-    const result = db.query("INSERT INTO guess_items (room_id, name, order_index) VALUES (?, ?, ?) RETURNING *")
-      .get(roomId, item.trim(), index) as GuessItem;
-    results.push(result);
+  await redis.hSet(`room:${roomId}`, {
+    id: roomId.toString(),
+    code,
+    host_id: "0",
+    status: "lobby",
+    created_at: now.toString()
   });
+  await redis.set(`rooms:code:${code}`, roomId.toString());
+  await redis.sAdd("rooms:ids", roomId.toString());
+
+  const hostId = await generateUniqueUserId();
+  await redis.hSet(`user:${hostId}`, {
+    id: hostId.toString(),
+    nickname: hostNickname,
+    room_id: roomId.toString(),
+    score: "0",
+    is_host: "1",
+    joined_at: now.toString()
+  });
+  await redis.zAdd(`room:${roomId}:users:z`, { score: now, value: hostId.toString() });
+
+  await redis.hSet(`room:${roomId}`, { host_id: hostId.toString() });
+
+  const room = await getRoomById(roomId);
+  const host = await getUserById(hostId);
+
+  if (!room || !host) throw new Error("Failed to create room");
+  return { room, host };
+};
+
+export const getRoomByCode = async (code: string): Promise<Room | null> => {
+  const roomId = await redis.get(`rooms:code:${code}`);
+  if (!roomId) return null;
+  return getRoomById(Number(roomId));
+};
+
+export const getRoomById = async (id: number): Promise<Room | null> => {
+  const raw = await getHash<Record<string, string>>(`room:${id}`);
+  return raw ? toRoom(raw) : null;
+};
+
+export const updateRoomStatus = async (roomId: number, status: RoomStatus): Promise<void> => {
+  await redis.hSet(`room:${roomId}`, { status });
+};
+
+export const createUser = async (nickname: string, roomId: number): Promise<User> => {
+  const now = Date.now();
+  const userId = await generateUniqueUserId();
+  await redis.hSet(`user:${userId}`, {
+    id: userId.toString(),
+    nickname,
+    room_id: roomId.toString(),
+    score: "0",
+    is_host: "0",
+    joined_at: now.toString()
+  });
+  await redis.zAdd(`room:${roomId}:users:z`, { score: now, value: userId.toString() });
+  const user = await getUserById(userId);
+  if (!user) throw new Error("Failed to create user");
+  return user;
+};
+
+export const getUserById = async (id: number): Promise<User | null> => {
+  const raw = await getHash<Record<string, string>>(`user:${id}`);
+  return raw ? toUser(raw) : null;
+};
+
+export const getUsersByRoom = async (roomId: number): Promise<User[]> => {
+  const userIds = await redis.zRange(`room:${roomId}:users:z`, 0, -1);
+  if (userIds.length === 0) return [];
+
+  const pipeline = redis.multi();
+  userIds.forEach(id => pipeline.hGetAll(`user:${id}`));
+  const results = (await pipeline.exec()) || [];
+
+  return results
+    .map(result => (result as Record<string, string>) || null)
+    .filter((raw): raw is Record<string, string> => !!raw && Object.keys(raw).length > 0)
+    .map(toUser);
+};
+
+export const updateUserScore = async (userId: number, scoreIncrement: number): Promise<void> => {
+  await redis.hIncrBy(`user:${userId}`, "score", scoreIncrement);
+};
+
+export const createGuessItems = async (roomId: number, items: string[]): Promise<GuessItem[]> => {
+  const results: GuessItem[] = [];
+
+  for (let index = 0; index < items.length; index++) {
+    const item = items[index]!;
+    const guessItemId = await nextId("next:guessItemId");
+
+    await redis.hSet(`guess_item:${guessItemId}`, {
+      id: guessItemId.toString(),
+      room_id: roomId.toString(),
+      name: item,
+      order_index: index.toString()
+    });
+    await redis.zAdd(`room:${roomId}:guess_items:z`, { score: index, value: guessItemId.toString() });
+
+    results.push({ id: guessItemId, room_id: roomId, name: item, order_index: index });
+  }
+
   return results;
 };
 
-export const getGuessItemsByRoom = (roomId: number): GuessItem[] => {
-  return db.query("SELECT * FROM guess_items WHERE room_id = ? ORDER BY order_index").all(roomId) as GuessItem[];
+export const getGuessItemsByRoom = async (roomId: number): Promise<GuessItem[]> => {
+  const ids = await redis.zRange(`room:${roomId}:guess_items:z`, 0, -1);
+  if (ids.length === 0) return [];
+  const pipeline = redis.multi();
+  ids.forEach(id => pipeline.hGetAll(`guess_item:${id}`));
+  const results = (await pipeline.exec()) || [];
+
+  return results
+    .map(result => (result as Record<string, string>) || null)
+    .filter((raw): raw is Record<string, string> => !!raw && Object.keys(raw).length > 0)
+    .map(toGuessItem);
 };
 
-export const getGuessItemById = (id: number): GuessItem | null => {
-  return db.query("SELECT * FROM guess_items WHERE id = ?").get(id) as GuessItem | null;
+export const getGuessItemById = async (id: number): Promise<GuessItem | null> => {
+  const raw = await getHash<Record<string, string>>(`guess_item:${id}`);
+  return raw ? toGuessItem(raw) : null;
 };
 
-// Association operations
-export const createAssociation = (userId: number, guessItemId: number, value: string): Association => {
+export const createAssociation = async (userId: number, guessItemId: number, value: string): Promise<Association> => {
   const now = Date.now();
-  return db.query("INSERT INTO associations (user_id, guess_item_id, value, submitted_at) VALUES (?, ?, ?, ?) RETURNING *")
-    .get(userId, guessItemId, value, now) as Association;
+  const associationId = await nextId("next:associationId");
+  const guessItem = await getGuessItemById(guessItemId);
+  if (!guessItem) throw new Error("Guess item not found");
+
+  await redis.hSet(`association:${associationId}`, {
+    id: associationId.toString(),
+    user_id: userId.toString(),
+    guess_item_id: guessItemId.toString(),
+    value,
+    submitted_at: now.toString()
+  });
+
+  await redis.sAdd(`room:${guessItem.room_id}:associations`, associationId.toString());
+  await redis.sAdd(`guess_item:${guessItemId}:associations`, associationId.toString());
+  await redis.set(`assoc:user:${userId}:item:${guessItemId}`, associationId.toString());
+
+  return { id: associationId, user_id: userId, guess_item_id: guessItemId, value, submitted_at: now };
 };
 
-export const getAssociationsByRoom = (roomId: number): Association[] => {
-  return db.query(`
-    SELECT a.* FROM associations a
-    JOIN users u ON a.user_id = u.id
-    WHERE u.room_id = ?
-  `).all(roomId) as Association[];
+export const getAssociationsByRoom = async (roomId: number): Promise<Association[]> => {
+  const ids = await redis.sMembers(`room:${roomId}:associations`);
+  if (ids.length === 0) return [];
+  const pipeline = redis.multi();
+  ids.forEach(id => pipeline.hGetAll(`association:${id}`));
+  const results = (await pipeline.exec()) || [];
+
+  return results
+    .map(result => (result as Record<string, string>) || null)
+    .filter((raw): raw is Record<string, string> => !!raw && Object.keys(raw).length > 0)
+    .map(toAssociation);
 };
 
-export const getAssociationsByGuessItem = (guessItemId: number): Association[] => {
-  return db.query("SELECT * FROM associations WHERE guess_item_id = ?").all(guessItemId) as Association[];
+export const getAssociationsByGuessItem = async (guessItemId: number): Promise<Association[]> => {
+  const ids = await redis.sMembers(`guess_item:${guessItemId}:associations`);
+  if (ids.length === 0) return [];
+  const pipeline = redis.multi();
+  ids.forEach(id => pipeline.hGetAll(`association:${id}`));
+  const results = (await pipeline.exec()) || [];
+
+  return results
+    .map(result => (result as Record<string, string>) || null)
+    .filter((raw): raw is Record<string, string> => !!raw && Object.keys(raw).length > 0)
+    .map(toAssociation);
 };
 
-export const getAssociationByUserAndItem = (userId: number, guessItemId: number): Association | null => {
-  return db.query("SELECT * FROM associations WHERE user_id = ? AND guess_item_id = ?")
-    .get(userId, guessItemId) as Association | null;
+export const getAssociationByUserAndItem = async (userId: number, guessItemId: number): Promise<Association | null> => {
+  const assocId = await redis.get(`assoc:user:${userId}:item:${guessItemId}`);
+  if (!assocId) return null;
+  const raw = await getHash<Record<string, string>>(`association:${assocId}`);
+  return raw ? toAssociation(raw) : null;
 };
 
-// Assignment operations
-export const setAssignments = (roomId: number, assignments: Map<number, number>): void => {
-  const insert = db.query(
-    "INSERT OR REPLACE INTO assignments (room_id, user_id, guess_item_id, assigned_at) VALUES (?, ?, ?, ?)"
-  );
-  const clear = db.query("DELETE FROM assignments WHERE room_id = ?");
+export const setAssignments = async (roomId: number, assignments: Map<number, number>): Promise<void> => {
+  await redis.del(`room:${roomId}:assignments`);
+  if (assignments.size === 0) return;
+  const data: Record<string, string> = {};
+  assignments.forEach((guessItemId, userId) => {
+    data[userId.toString()] = guessItemId.toString();
+  });
+  await redis.hSet(`room:${roomId}:assignments`, data);
+};
 
+export const getAssignmentByUser = async (
+  roomId: number,
+  userId: number
+): Promise<{ user_id: number; guess_item_id: number } | null> => {
+  const guessItemId = await redis.hGet(`room:${roomId}:assignments`, userId.toString());
+  if (!guessItemId) return null;
+  return { user_id: userId, guess_item_id: Number(guessItemId) };
+};
+
+export const getAssignmentsByRoom = async (
+  roomId: number
+): Promise<{ user_id: number; guess_item_id: number }[]> => {
+  const data = await redis.hGetAll(`room:${roomId}:assignments`);
+  return Object.entries(data).map(([userId, guessItemId]) => ({
+    user_id: Number(userId),
+    guess_item_id: Number(guessItemId)
+  }));
+};
+
+export const createGuess = async (
+  userId: number,
+  guessItemId: number,
+  guessedItemId: number,
+  roundNumber: number
+): Promise<Guess> => {
   const now = Date.now();
-  db.transaction(() => {
-    clear.run(roomId);
-    for (const [userId, guessItemId] of assignments.entries()) {
-      insert.run(roomId, userId, guessItemId, now);
+  const guessId = await nextId("next:guessId");
+  const user = await getUserById(userId);
+  if (!user) throw new Error("User not found");
+
+  await redis.hSet(`guess:${guessId}`, {
+    id: guessId.toString(),
+    user_id: userId.toString(),
+    guess_item_id: guessItemId.toString(),
+    guessed_item_id: guessedItemId.toString(),
+    round_number: roundNumber.toString(),
+    submitted_at: now.toString()
+  });
+
+  await redis.sAdd(`room:${user.room_id}:guesses`, guessId.toString());
+  await redis.sAdd(`room:${user.room_id}:round:${roundNumber}:guesses`, guessId.toString());
+
+  return {
+    id: guessId,
+    user_id: userId,
+    guess_item_id: guessItemId,
+    guessed_item_id: guessedItemId,
+    round_number: roundNumber,
+    submitted_at: now
+  };
+};
+
+export const getGuessesByRound = async (roomId: number, roundNumber: number): Promise<Guess[]> => {
+  const ids = await redis.sMembers(`room:${roomId}:round:${roundNumber}:guesses`);
+  if (ids.length === 0) return [];
+  const pipeline = redis.multi();
+  ids.forEach(id => pipeline.hGetAll(`guess:${id}`));
+  const results = (await pipeline.exec()) || [];
+
+  return results
+    .map(result => (result as Record<string, string>) || null)
+    .filter((raw): raw is Record<string, string> => !!raw && Object.keys(raw).length > 0)
+    .map(toGuess);
+};
+
+export const getGuessesByRoom = async (roomId: number): Promise<Guess[]> => {
+  const ids = await redis.sMembers(`room:${roomId}:guesses`);
+  if (ids.length === 0) return [];
+  const pipeline = redis.multi();
+  ids.forEach(id => pipeline.hGetAll(`guess:${id}`));
+  const results = (await pipeline.exec()) || [];
+
+  return results
+    .map(result => (result as Record<string, string>) || null)
+    .filter((raw): raw is Record<string, string> => !!raw && Object.keys(raw).length > 0)
+    .map(toGuess);
+};
+
+export const getGuessByUserAndRound = async (userId: number, roundNumber: number): Promise<Guess | null> => {
+  const user = await getUserById(userId);
+  if (!user) return null;
+  const ids = await redis.sMembers(`room:${user.room_id}:round:${roundNumber}:guesses`);
+  if (ids.length === 0) return null;
+
+  const pipeline = redis.multi();
+  ids.forEach(id => pipeline.hGetAll(`guess:${id}`));
+  const results = (await pipeline.exec()) || [];
+
+  for (const result of results) {
+    const raw = result as Record<string, string>;
+    if (raw && raw.user_id && Number(raw.user_id) === userId) {
+      return toGuess(raw);
     }
-  })();
+  }
+
+  return null;
 };
 
-export const getAssignmentByUser = (roomId: number, userId: number): { user_id: number; guess_item_id: number } | null => {
-  return db
-    .query("SELECT user_id, guess_item_id FROM assignments WHERE room_id = ? AND user_id = ?")
-    .get(roomId, userId) as { user_id: number; guess_item_id: number } | null;
+export const createRound = async (roomId: number, guessItemId: number, roundNumber: number): Promise<Round> => {
+  const roundId = await nextId("next:roundId");
+  await redis.hSet(`round:${roundId}`, {
+    id: roundId.toString(),
+    room_id: roomId.toString(),
+    guess_item_id: guessItemId.toString(),
+    round_number: roundNumber.toString(),
+    status: "active",
+    revealed_at: ""
+  });
+  await redis.zAdd(`room:${roomId}:rounds:z`, { score: roundNumber, value: roundId.toString() });
+
+  return {
+    id: roundId,
+    room_id: roomId,
+    guess_item_id: guessItemId,
+    round_number: roundNumber,
+    status: "active",
+    revealed_at: null
+  };
 };
 
-export const getAssignmentsByRoom = (roomId: number): { user_id: number; guess_item_id: number }[] => {
-  return db
-    .query("SELECT user_id, guess_item_id FROM assignments WHERE room_id = ?")
-    .all(roomId) as { user_id: number; guess_item_id: number }[];
+export const getCurrentRound = async (roomId: number): Promise<Round | null> => {
+  const ids = await redis.zRange(`room:${roomId}:rounds:z`, -1, -1);
+  if (ids.length === 0) return null;
+  const raw = await getHash<Record<string, string>>(`round:${ids[0]}`);
+  return raw ? toRound(raw) : null;
 };
 
-// Guess operations
-export const createGuess = (userId: number, guessItemId: number, guessedItemId: number, roundNumber: number): Guess => {
-  const now = Date.now();
-  return db.query("INSERT INTO guesses (user_id, guess_item_id, guessed_item_id, round_number, submitted_at) VALUES (?, ?, ?, ?, ?) RETURNING *")
-    .get(userId, guessItemId, guessedItemId, roundNumber, now) as Guess;
+export const updateRoundStatus = async (roundId: number, status: RoundStatus): Promise<void> => {
+  const now = status === "revealed" ? Date.now() : 0;
+  await redis.hSet(`round:${roundId}`, {
+    status,
+    revealed_at: now ? now.toString() : ""
+  });
 };
 
-export const getGuessesByRound = (roomId: number, roundNumber: number): Guess[] => {
-  return db.query(`
-    SELECT g.* FROM guesses g
-    JOIN users u ON g.user_id = u.id
-    WHERE u.room_id = ? AND g.round_number = ?
-  `).all(roomId, roundNumber) as Guess[];
-};
-
-export const getGuessesByRoom = (roomId: number): Guess[] => {
-  return db.query(`
-    SELECT g.* FROM guesses g
-    JOIN users u ON g.user_id = u.id
-    WHERE u.room_id = ?
-  `).all(roomId) as Guess[];
-};
-
-export const getGuessByUserAndRound = (userId: number, roundNumber: number): Guess | null => {
-  return db.query("SELECT * FROM guesses WHERE user_id = ? AND round_number = ?")
-    .get(userId, roundNumber) as Guess | null;
-};
-
-// Round operations
-export const createRound = (roomId: number, guessItemId: number, roundNumber: number): Round => {
-  return db.query("INSERT INTO rounds (room_id, guess_item_id, round_number, status, revealed_at) VALUES (?, ?, ?, ?, ?) RETURNING *")
-    .get(roomId, guessItemId, roundNumber, 'active', null) as Round;
-};
-
-export const getCurrentRound = (roomId: number): Round | null => {
-  return db.query("SELECT * FROM rounds WHERE room_id = ? ORDER BY round_number DESC LIMIT 1")
-    .get(roomId) as Round | null;
-};
-
-export const updateRoundStatus = (roundId: number, status: RoundStatus): void => {
-  const now = status === 'revealed' ? Date.now() : null;
-  db.query("UPDATE rounds SET status = ?, revealed_at = ? WHERE id = ?").run(status, now, roundId);
-};
-
-// Round options operations
-export const setRoundOptions = (roomId: number, roundNumber: number, guessItemIds: number[]): void => {
-  const clear = db.query("DELETE FROM round_options WHERE room_id = ? AND round_number = ?");
-  const insert = db.query(
-    "INSERT INTO round_options (room_id, round_number, guess_item_id, option_order) VALUES (?, ?, ?, ?)"
-  );
-
-  db.transaction(() => {
-    clear.run(roomId, roundNumber);
-    guessItemIds.forEach((guessItemId, index) => {
-      insert.run(roomId, roundNumber, guessItemId, index);
-    });
-  })();
-};
-
-export const getRoundOptions = (roomId: number, roundNumber: number): GuessItem[] => {
-  return db.query(`
-    SELECT gi.* FROM round_options ro
-    JOIN guess_items gi ON gi.id = ro.guess_item_id
-    WHERE ro.room_id = ? AND ro.round_number = ?
-    ORDER BY ro.option_order
-  `).all(roomId, roundNumber) as GuessItem[];
-};
-
-// Round queue operations
-export const clearRoundQueue = (roomId: number): void => {
-  db.query("DELETE FROM round_queue WHERE room_id = ?").run(roomId);
-};
-
-export const setRoundQueue = (roomId: number, phase: 'standard' | 'lightning', guessItemIds: number[]): void => {
-  const clear = db.query("DELETE FROM round_queue WHERE room_id = ? AND phase = ?");
-  const insert = db.query(
-    "INSERT INTO round_queue (room_id, phase, position, guess_item_id, played) VALUES (?, ?, ?, ?, 0)"
-  );
-
-  db.transaction(() => {
-    clear.run(roomId, phase);
-    guessItemIds.forEach((guessItemId, index) => {
-      insert.run(roomId, phase, index + 1, guessItemId);
-    });
-  })();
-};
-
-export const getNextQueuedItem = (
+export const setRoundOptions = async (
   roomId: number,
-  phase: 'standard' | 'lightning'
-): { guess_item_id: number } | null => {
-  return db.query(
-    "SELECT guess_item_id FROM round_queue WHERE room_id = ? AND phase = ? AND played = 0 ORDER BY position ASC LIMIT 1"
-  ).get(roomId, phase) as { guess_item_id: number } | null;
+  roundNumber: number,
+  guessItemIds: number[]
+): Promise<void> => {
+  const key = `room:${roomId}:round:${roundNumber}:options`;
+  await redis.del(key);
+  if (guessItemIds.length === 0) return;
+  await redis.rPush(key, guessItemIds.map(String));
 };
 
-export const markQueuedItemPlayed = (
+export const getRoundOptions = async (roomId: number, roundNumber: number): Promise<GuessItem[]> => {
+  const ids = await redis.lRange(`room:${roomId}:round:${roundNumber}:options`, 0, -1);
+  if (ids.length === 0) return [];
+  const pipeline = redis.multi();
+  ids.forEach(id => pipeline.hGetAll(`guess_item:${id}`));
+  const results = (await pipeline.exec()) || [];
+
+  return results
+    .map(result => (result as Record<string, string>) || null)
+    .filter((raw): raw is Record<string, string> => !!raw && Object.keys(raw).length > 0)
+    .map(toGuessItem);
+};
+
+export const clearRoundQueue = async (roomId: number): Promise<void> => {
+  await redis.del(`room:${roomId}:queue:standard`, `room:${roomId}:queue:lightning`);
+};
+
+export const setRoundQueue = async (
   roomId: number,
-  phase: 'standard' | 'lightning',
+  phase: "standard" | "lightning",
+  guessItemIds: number[]
+): Promise<void> => {
+  const key = `room:${roomId}:queue:${phase}`;
+  await redis.del(key);
+  if (guessItemIds.length === 0) return;
+  await redis.rPush(key, guessItemIds.map(String));
+};
+
+export const getNextQueuedItem = async (
+  roomId: number,
+  phase: "standard" | "lightning"
+): Promise<{ guess_item_id: number } | null> => {
+  const id = await redis.lIndex(`room:${roomId}:queue:${phase}`, 0);
+  if (!id) return null;
+  return { guess_item_id: Number(id) };
+};
+
+export const markQueuedItemPlayed = async (
+  roomId: number,
+  phase: "standard" | "lightning",
   guessItemId: number
-): void => {
-  db.query(
-    "UPDATE round_queue SET played = 1 WHERE room_id = ? AND phase = ? AND guess_item_id = ?"
-  ).run(roomId, phase, guessItemId);
+): Promise<void> => {
+  const key = `room:${roomId}:queue:${phase}`;
+  const popped = await redis.lPop(key);
+  if (popped && Number(popped) !== guessItemId) {
+    await redis.lRem(key, 1, guessItemId.toString());
+  }
 };
-
-export { db };

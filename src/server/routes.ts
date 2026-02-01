@@ -14,15 +14,15 @@ export const routes = {
     }
 
     try {
-      const { room, host } = db.createRoom(nickname);
-      game.initializeRoomState(room.id);
+      const { room, host } = await db.createRoom(nickname);
+      await game.initializeRoomState(room.id);
 
       return Response.json({
         room,
         user: host
       });
     } catch (error) {
-      console.error('Error creating room:', error);
+      console.error("Error creating room:", error);
       return Response.json({ error: "Failed to create room" }, { status: 500 });
     }
   },
@@ -39,30 +39,30 @@ export const routes = {
     }
 
     try {
-      const room = db.getRoomByCode(code.toUpperCase());
-      
+      const room = await db.getRoomByCode(code.toUpperCase());
+
       if (!room) {
         return Response.json({ error: "Room not found" }, { status: 404 });
       }
 
-      if (room.status !== 'lobby') {
+      if (room.status !== "lobby") {
         return Response.json({ error: "Room has already started" }, { status: 400 });
       }
 
-      const users = db.getUsersByRoom(room.id);
+      const users = await db.getUsersByRoom(room.id);
       if (users.length >= 50) {
         return Response.json({ error: "Room is full" }, { status: 400 });
       }
 
-      const user = db.createUser(nickname, room.id);
-      game.refreshRoomState(room.id);
+      const user = await db.createUser(nickname, room.id);
+      await game.refreshRoomState(room.id);
 
       return Response.json({
         room,
         user
       });
     } catch (error) {
-      console.error('Error joining room:', error);
+      console.error("Error joining room:", error);
       return Response.json({ error: "Failed to join room" }, { status: 500 });
     }
   },
@@ -78,17 +78,17 @@ export const routes = {
     }
 
     try {
-      const room = db.getRoomByCode(code.toUpperCase());
+      const room = await db.getRoomByCode(code.toUpperCase());
       if (!room) {
         return Response.json({ error: "Room not found" }, { status: 404 });
       }
 
-      const user = db.getUserById(userId);
+      const user = await db.getUserById(userId);
       if (!user || user.room_id !== room.id) {
         return Response.json({ error: "User not found" }, { status: 404 });
       }
 
-      game.refreshRoomState(room.id);
+      await game.refreshRoomState(room.id);
 
       return Response.json({
         room,
@@ -103,24 +103,24 @@ export const routes = {
   // Get room state
   "GET /api/room/:code": async (req: Request) => {
     const url = new URL(req.url);
-    const code = url.pathname.split('/').pop();
+    const code = url.pathname.split("/").pop();
 
     if (!code) {
       return Response.json({ error: "Room code is required" }, { status: 400 });
     }
 
     try {
-      const room = db.getRoomByCode(code.toUpperCase());
-      
+      const room = await db.getRoomByCode(code.toUpperCase());
+
       if (!room) {
         return Response.json({ error: "Room not found" }, { status: 404 });
       }
 
-      const state = game.getRoomState(room.id) || game.initializeRoomState(room.id);
+      const state = (await game.getRoomState(room.id)) || (await game.initializeRoomState(room.id));
 
       return Response.json(state);
     } catch (error) {
-      console.error('Error getting room:', error);
+      console.error("Error getting room:", error);
       return Response.json({ error: "Failed to get room" }, { status: 500 });
     }
   },
@@ -131,7 +131,7 @@ export const routes = {
   }
 };
 
-export function handleRoute(req: Request): Response | null {
+export async function handleRoute(req: Request): Promise<Response | null> {
   const url = new URL(req.url);
   const method = req.method;
   const path = url.pathname;
@@ -144,12 +144,12 @@ export function handleRoute(req: Request): Response | null {
 
   // Try pattern match for parameterized routes
   for (const [pattern, handler] of Object.entries(routes)) {
-    const [routeMethod, routePath] = pattern.split(' ');
-    
+    const [routeMethod, routePath] = pattern.split(" ");
+
     if (method !== routeMethod) continue;
 
     // Convert route pattern to regex
-    const regexPattern = routePath.replace(/:[^/]+/g, '([^/]+)');
+    const regexPattern = routePath.replace(/:[^/]+/g, "([^/]+)");
     const regex = new RegExp(`^${regexPattern}$`);
 
     if (regex.test(path)) {
