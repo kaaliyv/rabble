@@ -95,10 +95,19 @@ export const startGuessingPhase = async (roomId: number): Promise<void> => {
     throw new Error("No guess items available");
   }
 
+  const associations = await db.getAssociationsByRoom(roomId);
+  const itemsWithAssociations = new Set(associations.map(a => a.guess_item_id));
+  const playableItems = guessItems.filter(item => itemsWithAssociations.has(item.id));
+
+  if (playableItems.length === 0) {
+    await db.updateRoomStatus(roomId, "finished");
+    return;
+  }
+
   const players = (await db.getUsersByRoom(roomId)).filter(user => !user.is_host);
   const shouldCap = players.length > PLAYER_CAP_THRESHOLD;
 
-  const shuffled = [...guessItems].sort(() => Math.random() - 0.5);
+  const shuffled = [...playableItems].sort(() => Math.random() - 0.5);
   const standardCount = shouldCap ? Math.min(MAX_STANDARD_ROUNDS, shuffled.length) : shuffled.length;
   const standardItems = shuffled.slice(0, standardCount);
   const lightningItems = shuffled.slice(standardCount);

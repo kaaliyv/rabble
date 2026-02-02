@@ -213,6 +213,14 @@ export const getUsersByRoom = async (roomId: number): Promise<User[]> => {
     .map(toUser);
 };
 
+export const removeUserFromRoom = async (roomId: number, userId: number): Promise<void> => {
+  const multi = redis.multi();
+  multi.zRem(`room:${roomId}:users:z`, userId.toString());
+  multi.hDel(`room:${roomId}:assignments`, userId.toString());
+  multi.del(`user:${userId}`);
+  await multi.exec();
+};
+
 export const updateUserScore = async (userId: number, scoreIncrement: number): Promise<void> => {
   await redis.hIncrBy(`user:${userId}`, "score", scoreIncrement);
 };

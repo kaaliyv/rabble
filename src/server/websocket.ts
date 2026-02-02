@@ -10,6 +10,8 @@ interface WebSocketData {
 
 // Store active connections by room
 const roomConnections = new Map<number, Set<ServerWebSocket<WebSocketData>>>();
+const submissionTimers = new Map<number, NodeJS.Timeout>();
+const SUBMISSION_TIMEOUT_MS = 60_000;
 
 export const handleWebSocket = {
   async open(ws: ServerWebSocket<WebSocketData>) {
@@ -179,6 +181,7 @@ async function handleStartGame(roomId: number, userId: number, payload: { items?
 
   const assignments = await game.startSubmissionPhase(roomId);
   await db.setAssignments(roomId, assignments);
+  startSubmissionTimer(roomId);
 
   broadcastToRoom(roomId, {
     type: "game_started",
@@ -233,6 +236,7 @@ async function handleSubmitAssociation(roomId: number, userId: number, payload: 
   await broadcastRoomState(roomId);
 
   if (allSubmitted) {
+    clearSubmissionTimer(roomId);
     await game.startGuessingPhase(roomId);
     await startNextGuessingRound(roomId);
   }
@@ -338,6 +342,7 @@ async function handleNextRound(roomId: number, userId: number) {
         final_scores: finalUsers
       }
     });
+    clearSubmissionTimer(roomId);
     await broadcastRoomState(roomId);
   }
 }
@@ -404,11 +409,53 @@ async function handleCancelGame(roomId: number, userId: number) {
   if (room.status !== "lobby") return;
 
   await db.updateRoomStatus(roomId, "finished");
+  clearSubmissionTimer(roomId);
 
   broadcastToRoom(roomId, {
     type: "game_cancelled",
     payload: { message: "The host cancelled the game." }
   });
+}
+
+function startSubmissionTimer(roomId: number) {
+  clearSubmissionTimer(roomId);
+  const timeout = setTimeout(async () => {
+    const room = await db.getRoomById(roomId);
+    if (!room || room.status !== "submitting") return;
+
+    const assignments = await db.getAssignmentsByRoom(roomId);
+    const associations = await db.getAssociationsByRoom(roomId);
+    const submittedUsers = new Set(associations.map(a => a.user_id));
+
+    const toKick = assignments
+      .filter(a => !submittedUsers.has(a.user_id))
+      .map(a => a.user_id);
+
+    await Promise.all(toKick.map(userId => db.removeUserFromRoom(roomId, userId)));
+
+    await broadcastRoomState(roomId);
+
+    await game.startGuessingPhase(roomId);
+    const updatedRoom = await db.getRoomById(roomId);
+    if (updatedRoom?.status === "finished") {
+      broadcastToRoom(roomId, {
+        type: "game_finished",
+        payload: { final_scores: await db.getUsersByRoom(roomId) }
+      });
+      return;
+    }
+    await startNextGuessingRound(roomId);
+  }, SUBMISSION_TIMEOUT_MS);
+
+  submissionTimers.set(roomId, timeout);
+}
+
+function clearSubmissionTimer(roomId: number) {
+  const timer = submissionTimers.get(roomId);
+  if (timer) {
+    clearTimeout(timer);
+    submissionTimers.delete(roomId);
+  }
 }
 
 async function startNextGuessingRound(roomId: number) {

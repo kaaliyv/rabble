@@ -53,6 +53,12 @@ export const routes = {
       if (users.length >= 50) {
         return Response.json({ error: "Room is full" }, { status: 400 });
       }
+      const nameTaken = users.some(
+        user => user.nickname.trim().toLowerCase() === nickname.trim().toLowerCase()
+      );
+      if (nameTaken) {
+        return Response.json({ error: "Nickname already taken" }, { status: 400 });
+      }
 
       const user = await db.createUser(nickname, room.id);
       await game.refreshRoomState(room.id);
