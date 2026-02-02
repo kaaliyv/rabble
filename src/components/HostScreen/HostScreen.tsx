@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import type { RoomState, User, VoteTally } from "../../types/game";
+import QRCode from "qrcode";
 import HostControls from "../Shared/HostControls";
 
 interface HostScreenProps {
@@ -56,6 +58,19 @@ export default function HostScreen({ roomState, ws, onLeave }: HostScreenProps) 
   const players = roomState.users.filter(user => !user.is_host);
   const hostUser = roomState.users.find(user => user.is_host) || roomState.users[0];
   const totalRounds = roomState.guessItems.length;
+  const [qrUrl, setQrUrl] = useState<string>("");
+  const baseUrl =
+    (import.meta as any).env?.BUN_PUBLIC_BASE_URL ||
+    (import.meta as any).env?.VITE_BASE_URL ||
+    window.location.origin;
+
+  useEffect(() => {
+    const joinUrl = `${baseUrl.replace(/\/$/, "")}/?code=${roomState.room.code}`;
+
+    QRCode.toDataURL(joinUrl, { margin: 1, width: 360 })
+      .then((dataUrl) => setQrUrl(dataUrl))
+      .catch(() => setQrUrl(""));
+  }, [roomState.room.code]);
 
   if (roomState.room.status === "lobby") {
     return (
@@ -76,20 +91,40 @@ export default function HostScreen({ roomState, ws, onLeave }: HostScreenProps) 
               <p className="mt-4 text-indigo-100">Players join at this code on their phones.</p>
             </div>
 
-            <div className="mt-10">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-2xl font-bold">Players</h2>
-                <span className="text-indigo-200">{players.length}/50</span>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {players.map(player => (
-                  <div key={player.id} className="bg-white/10 rounded-2xl px-4 py-3">
-                    <div className="text-lg font-semibold">{player.nickname}</div>
+            <div className="mt-10 grid gap-8 lg:grid-cols-[1fr_1.2fr] items-center">
+              <div className="flex flex-col items-center gap-4">
+                <div className="text-sm uppercase tracking-[0.3em] text-indigo-200">Scan to Join</div>
+                {qrUrl ? (
+                  <img
+                    src={qrUrl}
+                    alt="Rabble join QR code"
+                    className="w-52 h-52 rounded-2xl border border-white/30 shadow-xl bg-white p-3"
+                  />
+                ) : (
+                  <div className="w-52 h-52 rounded-2xl border border-white/30 bg-white/10 flex items-center justify-center text-indigo-100">
+                    QR loading...
                   </div>
-                ))}
-                {players.length === 0 && (
-                  <div className="col-span-full text-indigo-100">Waiting for players to join...</div>
                 )}
+                <div className="text-xs text-indigo-100 break-all text-center">
+                  {baseUrl.replace(/\/$/, "")}/?code={roomState.room.code}
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-2xl font-bold">Players</h2>
+                  <span className="text-indigo-200">{players.length}/50</span>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {players.map(player => (
+                    <div key={player.id} className="bg-white/10 rounded-2xl px-4 py-3">
+                      <div className="text-lg font-semibold">{player.nickname}</div>
+                    </div>
+                  ))}
+                  {players.length === 0 && (
+                    <div className="col-span-full text-indigo-100">Waiting for players to join...</div>
+                  )}
+                </div>
               </div>
             </div>
           </div>

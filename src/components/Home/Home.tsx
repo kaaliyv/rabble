@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 interface HomeProps {
   onCreateRoom: (nickname: string) => void;
@@ -10,6 +10,15 @@ export default function Home({ onCreateRoom, onJoinRoom }: HomeProps) {
   const [joinName, setJoinName] = useState("");
   const [joinCode, setJoinCode] = useState("");
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (joinCode) return;
+    const params = new URLSearchParams(window.location.search);
+    const codeParam = params.get("code");
+    if (codeParam) {
+      setJoinCode(codeParam.trim().toUpperCase().slice(0, 4));
+    }
+  }, [joinCode]);
 
   const handleCreate = () => {
     const nickname = createName.trim();
