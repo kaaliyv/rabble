@@ -127,6 +127,12 @@ export default function HostScreen({ roomState, ws, onLeave }: HostScreenProps) 
                 </div>
               </div>
             </div>
+
+            {hostUser && (
+              <div className="mt-10 bg-white/10 rounded-3xl border border-white/20 p-6">
+                <HostControls roomState={roomState} currentUser={hostUser} ws={ws} />
+              </div>
+            )}
           </div>
 
           <div className="mt-8 flex justify-center">
@@ -135,7 +141,6 @@ export default function HostScreen({ roomState, ws, onLeave }: HostScreenProps) 
             </div>
           </div>
         </div>
-
         {hostUser && (
           <div className="absolute bottom-6 right-6 w-80">
             <HostControls roomState={roomState} currentUser={hostUser} ws={ws} />
@@ -173,7 +178,6 @@ export default function HostScreen({ roomState, ws, onLeave }: HostScreenProps) 
             </div>
           </div>
         </div>
-
         {hostUser && (
           <div className="absolute bottom-6 right-6 w-80">
             <HostControls roomState={roomState} currentUser={hostUser} ws={ws} />
@@ -274,12 +278,12 @@ export default function HostScreen({ roomState, ws, onLeave }: HostScreenProps) 
             </div>
           </div>
         </div>
-
         {hostUser && (
           <div className="absolute bottom-6 right-6 w-80">
             <HostControls roomState={roomState} currentUser={hostUser} ws={ws} />
           </div>
         )}
+
       </div>
     );
   }

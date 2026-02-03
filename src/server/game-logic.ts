@@ -8,16 +8,22 @@ export const initializeRoomState = async (roomId: number): Promise<RoomState> =>
   const room = await db.getRoomById(roomId);
   if (!room) throw new Error("Room not found");
 
-  const state: RoomState = {
-    room,
-    users: await db.getUsersByRoom(roomId),
-    guessItems: await db.getGuessItemsByRoom(roomId),
-    currentRound: await db.getCurrentRound(roomId),
-    associations: await db.getAssociationsByRoom(roomId),
-    guesses: await db.getGuessesByRoom(roomId)
-  };
+  const [users, guessItems, currentRound, associations, guesses] = await Promise.all([
+    db.getUsersByRoom(roomId),
+    db.getGuessItemsByRoom(roomId),
+    db.getCurrentRound(roomId),
+    db.getAssociationsByRoom(roomId),
+    db.getGuessesByRoom(roomId)
+  ]);
 
-  return state;
+  return {
+    room,
+    users,
+    guessItems,
+    currentRound,
+    associations,
+    guesses
+  };
 };
 
 export const getRoomState = async (roomId: number): Promise<RoomState | null> => {
@@ -34,25 +40,28 @@ export const refreshRoomState = async (roomId: number): Promise<RoomState> => {
 
 // Assign guess items to users
 export const assignGuessItems = async (roomId: number): Promise<Map<number, number>> => {
-  const users = (await db.getUsersByRoom(roomId)).filter(user => !user.is_host);
-  const guessItems = await db.getGuessItemsByRoom(roomId);
+  const [users, guessItems] = await Promise.all([
+    db.getUsersByRoom(roomId),
+    db.getGuessItemsByRoom(roomId)
+  ]);
+  const players = users.filter(user => !user.is_host);
 
   if (guessItems.length === 0) {
     throw new Error("No guess items to assign");
   }
 
-  if (users.length === 0) {
+  if (players.length === 0) {
     throw new Error("No players available");
   }
 
   const assignments = new Map<number, number>(); // userId -> guessItemId
 
   // Calculate how many users per item
-  const usersPerItem = Math.floor(users.length / guessItems.length);
-  const remainder = users.length % guessItems.length;
+  const usersPerItem = Math.floor(players.length / guessItems.length);
+  const remainder = players.length % guessItems.length;
 
   // Shuffle users
-  const shuffledUsers = [...users].sort(() => Math.random() - 0.5);
+  const shuffledUsers = [...players].sort(() => Math.random() - 0.5);
 
   let userIndex = 0;
   guessItems.forEach((item, itemIndex) => {
@@ -90,12 +99,16 @@ export const checkAllSubmitted = async (roomId: number, assignments: Map<number,
 
 // Start guessing phase with first round
 export const startGuessingPhase = async (roomId: number): Promise<void> => {
-  const guessItems = await db.getGuessItemsByRoom(roomId);
+  const [guessItems, associations, users] = await Promise.all([
+    db.getGuessItemsByRoom(roomId),
+    db.getAssociationsByRoom(roomId),
+    db.getUsersByRoom(roomId)
+  ]);
+
   if (guessItems.length === 0) {
     throw new Error("No guess items available");
   }
 
-  const associations = await db.getAssociationsByRoom(roomId);
   const itemsWithAssociations = new Set(associations.map(a => a.guess_item_id));
   const playableItems = guessItems.filter(item => itemsWithAssociations.has(item.id));
 
@@ -104,7 +117,7 @@ export const startGuessingPhase = async (roomId: number): Promise<void> => {
     return;
   }
 
-  const players = (await db.getUsersByRoom(roomId)).filter(user => !user.is_host);
+  const players = users.filter(user => !user.is_host);
   const shouldCap = players.length > PLAYER_CAP_THRESHOLD;
 
   const shuffled = [...playableItems].sort(() => Math.random() - 0.5);
@@ -112,10 +125,11 @@ export const startGuessingPhase = async (roomId: number): Promise<void> => {
   const standardItems = shuffled.slice(0, standardCount);
   const lightningItems = shuffled.slice(standardCount);
 
-  await db.setRoundQueue(roomId, "standard", standardItems.map(item => item.id));
-  await db.setRoundQueue(roomId, "lightning", lightningItems.map(item => item.id));
-
-  await db.updateRoomStatus(roomId, "guessing");
+  await Promise.all([
+    db.setRoundQueue(roomId, "standard", standardItems.map(item => item.id)),
+    db.setRoundQueue(roomId, "lightning", lightningItems.map(item => item.id)),
+    db.updateRoomStatus(roomId, "guessing")
+  ]);
 
   const started = await startNextQueuedRound(roomId, "standard");
   if (!started && lightningItems.length > 0) {
@@ -127,11 +141,14 @@ export const startGuessingPhase = async (roomId: number): Promise<void> => {
 
 // Get users who should guess (exclude those who wrote associations for this item)
 export const getEligibleGuessers = async (roomId: number, guessItemId: number): Promise<User[]> => {
-  const users = (await db.getUsersByRoom(roomId)).filter(user => !user.is_host);
-  const associations = await db.getAssociationsByGuessItem(guessItemId);
+  const [users, associations] = await Promise.all([
+    db.getUsersByRoom(roomId),
+    db.getAssociationsByGuessItem(guessItemId)
+  ]);
+  const players = users.filter(user => !user.is_host);
   const excludedUserIds = new Set(associations.map(a => a.user_id));
 
-  return users.filter(u => !excludedUserIds.has(u.id));
+  return players.filter(u => !excludedUserIds.has(u.id));
 };
 
 // Get random options for multiple choice (current item + 3 others)
@@ -168,8 +185,10 @@ export const ensureRoundOptions = async (
 
 // Calculate vote tallies
 export const calculateVoteTallies = async (roomId: number, roundNumber: number): Promise<VoteTally[]> => {
-  const guesses = await db.getGuessesByRound(roomId, roundNumber);
-  const guessItems = await db.getGuessItemsByRoom(roomId);
+  const [guesses, guessItems] = await Promise.all([
+    db.getGuessesByRound(roomId, roundNumber),
+    db.getGuessItemsByRoom(roomId)
+  ]);
 
   const tallies = new Map<number, number>();
 

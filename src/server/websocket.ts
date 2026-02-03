@@ -169,15 +169,12 @@ async function handleStartGame(roomId: number, userId: number, payload: { items?
     return;
   }
 
-  if (items.length > players.length) {
-    sendToUser(roomId, userId, {
-      type: "error",
-      payload: { message: "Number of items cannot exceed number of players" }
-    });
-    return;
-  }
+  const selectedItems =
+    items.length > players.length
+      ? [...items].sort(() => Math.random() - 0.5).slice(0, players.length)
+      : items;
 
-  await db.createGuessItems(roomId, items);
+  await db.createGuessItems(roomId, selectedItems);
 
   const assignments = await game.startSubmissionPhase(roomId);
   await db.setAssignments(roomId, assignments);

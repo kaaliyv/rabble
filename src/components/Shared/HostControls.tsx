@@ -50,11 +50,6 @@ export default function HostControls({ roomState, ws }: HostControlsProps) {
       return;
     }
 
-    if (items.length > players.length) {
-      setError("Number of items cannot exceed number of players");
-      return;
-    }
-
     setError("");
 
     ws.send(JSON.stringify({
@@ -95,7 +90,7 @@ export default function HostControls({ roomState, ws }: HostControlsProps) {
             rows={4}
           />
           <p className="text-xs text-gray-500 mt-1">
-            Minimum 4 items. More items means more rounds.
+            Minimum 4 items. If you enter more than players, we will randomly pick enough.
           </p>
           {error && (
             <p className="text-xs text-red-600 mt-2">{error}</p>
