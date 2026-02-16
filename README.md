@@ -13,6 +13,13 @@ Rabble is a fast, Jackbox-style word association party game for groups. Players 
 
 For large rooms (15+ players), the game automatically caps normal rounds and finishes with **Lightning Finals** so the game stays short while still using all submitted words.
 
+## Live Demo
+
+Available at: http://rabble-production.up.railway.app/
+
+(Hosted on Railway — uptime not guaranteed :P )
+
+
 ## Getting Started
 
 Install dependencies:
